@@ -15,13 +15,13 @@
 
 ## Чекпоинт 2 — OBS WebSocket (управление сценами/аудио)
 Задачи:
-- Реализовать `obs_client.py`: connect, `SetCurrentProgramScene`, `SetInputSettings`, `RestartMedia`.
-- Добавить `self_check()`:
-  - коннект к OBS WebSocket;
-  - проверка сцен/источника (`SCENE_A/SCENE_B/SCENE_IDLE`, `AUDIO_PLAYER`);
-  - тестовый `SetInputSettings` + `RestartMedia`;
-  - дождаться `MediaInputPlaybackStarted` или `GetMediaInputStatus=playing`.
-- Проверка: `obs_client.py` переключает `SCENE_A/SCENE_B` и перезапускает `AUDIO_PLAYER` с тестовым mp3.
+- ~~Реализовать `obs_client.py`: connect, `SetCurrentProgramScene`, `SetInputSettings`, `RestartMedia`.~~
+- ~~Добавить `self_check()`:~~
+  - ~~коннект к OBS WebSocket;~~
+  - ~~проверка сцен/источника (`SCENE_A/SCENE_B/SCENE_IDLE`, `AUDIO_PLAYER`);~~
+  - ~~тестовый `SetInputSettings` + `RestartMedia`;~~
+  - ~~дождаться `MediaInputPlaybackStarted` или `GetMediaInputStatus=playing`.~~
+- ~~Проверка: `obs_client.py` переключает `SCENE_A/SCENE_B` и перезапускает `AUDIO_PLAYER` с тестовым mp3.~~
 
 ## Чекпоинт 3 — Оркестратор без LLM/TTS
 Задачи:
