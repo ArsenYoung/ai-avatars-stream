@@ -26,15 +26,15 @@
 ## Чекпоинт 3 — Оркестратор без LLM/TTS
 Задачи:
 - Реализовать очередь и state machine в `orchestrator.py`:
-  - `ensure_queue_floor(min_items=2)`;
-  - `play_next()` (scene switch → set file → restart media);
+  - ~~`ensure_queue_floor(min_items=2)`;~~
+  - ~~`play_next()` (scene switch → set file → restart media);~~
   - `prefetch_next()`.
-- Ожидание конца проигрывания: `MediaInputPlaybackEnded` или polling `GetMediaInputStatus` раз в 200–500мс.
-- Реализовать bridging‑поведение:
-  - если очередь пуста — ставить `SCENE_IDLE` и не переключать A/B;
-  - короткая пауза без дёргания сцен.
-- Реализовать запись транскрипта (JSONL базовый набор полей).
-- Проверка: `orchestrator` гоняет заранее готовые mp3 5 минут, сцены синхронны, тишины нет.
+- ~~Ожидание конца проигрывания: `MediaInputPlaybackEnded` или polling `GetMediaInputStatus` раз в 200–500мс.~~
+- ~~Реализовать bridging‑поведение:~~
+  - ~~если очередь пуста — ставить `SCENE_IDLE` и не переключать A/B;~~
+  - ~~короткая пауза без дёргания сцен.~~
+- ~~Реализовать запись транскрипта (JSONL базовый набор полей).~~
+- ~~Проверка: `orchestrator` гоняет заранее готовые mp3 5 минут, сцены синхронны, тишины нет.~~
 
 ## Чекпоинт 4 — Полный пайплайн (LLM + TTS)
 Задачи:

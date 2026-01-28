@@ -81,12 +81,25 @@ class ObsClient:
     def restart_media(self, input_name: str) -> None:
         self.ws.trigger_media_input_action(input_name, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART")
 
+    def get_media_status(self, input_name: str) -> dict:
+        st = self.ws.get_media_input_status(input_name)
+        state = getattr(st, "media_state", None)
+        if state is None:
+            return {}
+        s = str(state)
+        if s.startswith("OBS_MEDIA_STATE_"):
+            s = s.replace("OBS_MEDIA_STATE_", "").lower()
+        else:
+            s = s.lower()
+        return {"state": s, "mediaState": s}
+
     def wait_media_playing(self, input_name: str, timeout_s: float = 5.0, poll_s: float = 0.2) -> bool:
         t0 = time.time()
         while time.time() - t0 < timeout_s:
             st = self.ws.get_media_input_status(input_name)
             # states: "OBS_MEDIA_STATE_PLAYING", "OBS_MEDIA_STATE_ENDED", etc.
-            if getattr(st, "media_state", None) == "OBS_MEDIA_STATE_PLAYING":
+            state = getattr(st, "media_state", None)
+            if state in ("OBS_MEDIA_STATE_PLAYING", "OBS_MEDIA_STATE_ENDED"):
                 return True
             time.sleep(poll_s)
         return False
