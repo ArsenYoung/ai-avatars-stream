@@ -28,7 +28,7 @@
 - Реализовать очередь и state machine в `orchestrator.py`:
   - ~~`ensure_queue_floor(min_items=2)`;~~
   - ~~`play_next()` (scene switch → set file → restart media);~~
-  - `prefetch_next()`.
+  - ~~`prefetch_next()`~~.
 - ~~Ожидание конца проигрывания: `MediaInputPlaybackEnded` или polling `GetMediaInputStatus` раз в 200–500мс.~~
 - ~~Реализовать bridging‑поведение:~~
   - ~~если очередь пуста — ставить `SCENE_IDLE` и не переключать A/B;~~
@@ -39,20 +39,31 @@
 ## Чекпоинт 4 — Полный пайплайн (LLM + TTS)
 Задачи:
 - Реализовать `llm.py`:
-  - роли Scientist/Skeptic;
-  - лимит длины 6–12 сек (1–3 предложения);
-  - анти‑повторы (последние 3 хода);
-  - retry/backoff `max_retries=5`, `timeout_s=60`, логирование 429/5xx/timeout.
+  - ~~роли Scientist/Skeptic;~~
+  - ~~лимит длины реплик (1–2 предложения, `MAX_SENTENCES`);~~
+  - ~~анти‑повторы (последние 3 хода);~~
+  - ~~retry/backoff `max_retries=5` (без таймаутов).~~
+  - timeout_s=60, логирование 429/5xx/timeout.
 - Реализовать `tts.py`:
-  - `speak(text, voice) -> mp3_path`;
-  - atomic write `tmp.mp3` → `os.replace(tmp, final)`;
-  - retry/backoff `max_retries=5`, `timeout_s=60`.
+  - ~~`speak(text, voice, out_path)`;~~
+  - ~~atomic write `tmp.mp3` → `os.replace(tmp, final)`;~~
+  - ~~retry/backoff `max_retries=5` (без таймаутов).~~
+  - timeout_s=60.
 - Реализовать `summarize.py`:
-  - обновление `running_summary` по длине history;
-  - запрет на добавление новых фактов.
+  - ~~обновление `running_summary` по длине history;~~
+  - ~~запрет на добавление новых фактов.~~
 - Реализовать `topic.py`:
-  - `TOPIC` env или `topic.txt`;
-  - hot‑reload 2–5 минут.
-- Расширить транскрипт: `timestamp`, `speaker`, `turn_id`, `llm_latency`, `tts_latency`, `model`, `audio_file`, `prompt_version`, `summary_len`.
+  - ~~`TOPIC` env или `topic.txt`;~~
+  - ~~hot‑reload 2–5 минут.~~
+- ~~Расширить транскрипт: `timestamp`, `speaker`, `turn_id`, `llm_latency`, `tts_latency`, `model`, `audio_file`, `prompt_version`, `summary_len`.~~
 - Проверка: LLM+TTS 10–15 минут, `transcript.jsonl` пишется и flushится, очередь не падает ниже 1.
 - Финальная проверка демо: YouTube Live/Unlisted, локальная запись в OBS, план B готов.
+
+## ВАУ‑эффект для сдачи (что ещё нужно сделать)
+Задачи:
+- Добавить визуальный «шоу‑формат» в OBS: нижние титры (спикер/тема), плашка «этап» (intro/обсуждение/итог/closing).
+- Лёгкий lip‑sync или аудио‑реактивная анимация аватара (scale/opacity на речь).
+- Визуальные переходы между A/B (fade/slide) + короткий стингер в начале/конце.
+- «Счёт/баланс» только в блоках «Смена уровня» (1 строка в оверлее).
+- Тема из чата (YouTube/Twitch) с ручным whitelist/таймаутом — если есть время.
+- Аудио‑полировка: нормализация громкости, лёгкий компрессор/лимитер в OBS.
