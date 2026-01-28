@@ -2,16 +2,16 @@
 
 ## Чекпоинт 1 — OBS‑only (ручное аудио)
 Задачи:
-- Зафиксировать дефолты: Media Source + `AUDIO_PLAYER`, `queue_floor=2`, hot‑reload темы 2–5 мин, контекст 10–12 реплик.
-- Создать структуру проекта: `src/`, `assets/`, `audio/`, `logs/`, `transcripts/`.
-- Подготовить `.env.example` с переменными (OBS/ключи/пути/модели/голоса).
-- Зафиксировать зависимости и запуск: `requirements.txt`/`pyproject.toml`, `python -m venv .venv`, `pip install -r requirements.txt`, `python -m src.main`.
-- Указать OBS 28+ (websocket встроен) и где включить WebSocket в настройках OBS.
-- Подготовить 2 PNG‑аватара и положить в `assets/`.
-- Настроить OBS: сцены `SCENE_A`, `SCENE_B`, `SCENE_IDLE`, источник `AUDIO_PLAYER` (Media Source), `AVATAR_A`, `AVATAR_B`.
-- Включить локальную запись в OBS (план B).
-- Сделать короткий тестовый mp3 (1–2 сек).
-- Проверка: вручную подставить mp3 в `AUDIO_PLAYER`, нажать play → в записи OBS есть звук.
+- ~~Зафиксировать дефолты: Media Source + `AUDIO_PLAYER`, `queue_floor=2`, hot‑reload темы 2–5 мин, контекст 10–12 реплик.~~
+- ~~Создать структуру проекта: `src/`, `assets/`, `audio/`, `logs/`, `transcripts/`.~~
+- ~~Подготовить `.env.example` с переменными (OBS/ключи/пути/модели/голоса).~~
+- ~~Зафиксировать зависимости и запуск: `requirements.txt`/`pyproject.toml`, `python -m venv .venv`, `pip install -r requirements.txt`, `python -m src.main`.~~
+- ~~Указать OBS 28+ (websocket встроен) и где включить WebSocket в настройках OBS.~~
+- ~~Подготовить 2 PNG‑аватара и положить в `assets/`.~~
+- ~~Настроить OBS: сцены `SCENE_A`, `SCENE_B`, `SCENE_IDLE`, источник `AUDIO_PLAYER` (Media Source), `AVATAR_A`, `AVATAR_B`.~~
+- ~~Включить локальную запись в OBS (план B).~~
+- ~~Сделать короткий тестовый mp3 (1–2 сек).~~
+- ~~Проверка: вручную подставить mp3 в `AUDIO_PLAYER`, нажать play → в записи OBS есть звук.~~
 
 ## Чекпоинт 2 — OBS WebSocket (управление сценами/аудио)
 Задачи:
