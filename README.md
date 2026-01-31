@@ -13,7 +13,7 @@
 Кадр из видео/OBS (две PNG + активный спикер, DIM/SPEAK):  
 ![OBS PNG + DIM/SPEAK](docs/screenshots/obs.png)
 
-Кадр с логом/транскриптом (llm_latency/tts_latency):  
+Кадр с логом/транскриптом:  
 ![Transcript + latency](docs/screenshots/worker.png)
 
 ## Соответствие ТЗ
