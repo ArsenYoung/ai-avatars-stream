@@ -18,6 +18,32 @@
     <p>Open these URLs in OBS Browser Source:</p>
     <a href="/agent.html?agent=A">Agent A</a>
     <a href="/agent.html?agent=B">Agent B</a>
+    <p>Status:</p>
+    <div>Agent A: <span id="statusA">No session yet</span></div>
+    <div>Agent B: <span id="statusB">No session yet</span></div>
     <p>Session JSON: <a href="/api/sessions">/api/sessions</a></p>
+    <script>
+      async function loadStatus(agent, el) {
+        try {
+          const res = await fetch(`/api/session?agent=${encodeURIComponent(agent)}`, { cache: "no-store" });
+          if (!res.ok) {
+            el.textContent = "No session yet";
+            return;
+          }
+          const data = await res.json();
+          el.textContent = data.session_id ? `connected (${data.session_id})` : "No session yet";
+        } catch (err) {
+          el.textContent = "No session yet";
+        }
+      }
+      const elA = document.getElementById("statusA");
+      const elB = document.getElementById("statusB");
+      function tick() {
+        loadStatus("A", elA);
+        loadStatus("B", elB);
+      }
+      tick();
+      setInterval(tick, 2000);
+    </script>
   </body>
 </html>

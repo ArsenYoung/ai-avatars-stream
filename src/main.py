@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from src.obs_client import ObsClient, ObsConfig
 from src.orchestrator import Orchestrator
+from src.mode import resolve_avatar_mode, ALLOWED_MODES
 from src.stream_server import StreamServer
 
 
@@ -30,10 +31,19 @@ def main():
     args = _parse_args()
     if args.text_only:
         os.environ["TEXT_ONLY"] = "1"
+        os.environ["AVATAR_MODE"] = "text"
     elif args.audio:
         os.environ.pop("TEXT_ONLY", None)
+        if os.environ.get("AVATAR_MODE", "").strip().lower() == "text":
+            os.environ["AVATAR_MODE"] = "png"
     if args.text_sleep is not None:
         os.environ["TEXT_ONLY_SLEEP_S"] = str(args.text_sleep)
+
+    raw_mode = (os.getenv("AVATAR_MODE", "") or "").strip().lower()
+    if raw_mode and raw_mode not in ALLOWED_MODES:
+        print(f"[mode] warn: unknown AVATAR_MODE={raw_mode!r}, falling back to legacy flags")
+    resolved_mode = resolve_avatar_mode()
+    print(f"[mode] Resolved mode: {resolved_mode}")
 
     obs = ObsClient(ObsConfig(
         host=_env("OBS_HOST", default="127.0.0.1") or "127.0.0.1",
@@ -46,11 +56,11 @@ def main():
         test_wav=_env("TEST_WAV", default="audio/test.wav") or "audio/test.wav",
     ))
 
-    stream_mode = (_env("STREAM_MODE", default="") or "").strip().lower()
-    streaming = (_env("HEYGEN_STREAMING", default="") or "").strip() == "1" or stream_mode == "heygen"
-    video_mode = (_env("VIDEO_MODE", default="") or "").strip() == "1" and not streaming and os.getenv("TEXT_ONLY", "").strip() != "1"
+    streaming = resolved_mode == "heygen_stream"
+    video_mode = resolved_mode == "heygen_video"
+    text_only = resolved_mode == "text"
 
-    if os.getenv("TEXT_ONLY", "").strip() != "1":
+    if not text_only:
         # streaming uses Browser Source; video_mode uses MP4 Media Sources (no AUDIO_PLAYER check)
         obs.self_check(check_media=(not streaming and not video_mode))
         if video_mode:

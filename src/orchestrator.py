@@ -21,6 +21,7 @@ from src.tts import TTSConfig, TTS
 from src.heygen import guess_mime
 from src.heygen_stream import HeygenStreamClient, HeygenStreamConfig, StreamSession, write_sessions_file
 from src.retry import retry
+from src.mode import resolve_avatar_mode
 
 
 @dataclass
@@ -90,11 +91,12 @@ class Orchestrator:
         self.media_start_retries = int(_env("MEDIA_START_RETRIES", default="2"))
         self.media_start_retry_sleep_s = float(_env("MEDIA_START_RETRY_SLEEP_S", default="0.2"))
         self.scene_switch_delay_s = float(_env("SCENE_SWITCH_DELAY_S", default="0.0"))
-        self.text_only = _env("TEXT_ONLY", default="").strip() == "1"
+        self.highlight_pre_delay_s = float(_env("HIGHLIGHT_PRE_DELAY_S", default="0.15"))
+        self.avatar_mode = resolve_avatar_mode()
+        self.text_only = self.avatar_mode == "text"
         self.text_only_sleep_s = float(_env("TEXT_ONLY_SLEEP_S", default="0.5"))
-        stream_mode = _env("STREAM_MODE", default="").strip().lower()
-        self.streaming_mode = _env("HEYGEN_STREAMING", default="").strip() == "1" or stream_mode in {"heygen", "stream", "streaming"}
-        self.video_mode = (not self.text_only) and (not self.streaming_mode) and (_env("VIDEO_MODE", default="").strip() == "1")
+        self.streaming_mode = self.avatar_mode == "heygen_stream"
+        self.video_mode = self.avatar_mode == "heygen_video"
         self.video_dir = Path(os.getenv("VIDEO_DIR", "video/preloaded"))
         self.video_player_a = os.getenv("VIDEO_PLAYER_A", "MEDIA_A_MP4")
         self.video_player_b = os.getenv("VIDEO_PLAYER_B", "MEDIA_B_MP4")
@@ -267,16 +269,47 @@ class Orchestrator:
             try:
                 self.avatar_a_exists = bool(self.obs) and self.obs.source_exists(self.avatar_a)
                 self.avatar_b_exists = bool(self.obs) and self.obs.source_exists(self.avatar_b)
+                self.avatar_a_has_dim = self.avatar_a_exists and self.obs.has_filter(self.avatar_a, self.f_dim)
+                self.avatar_a_has_speak = self.avatar_a_exists and self.obs.has_filter(self.avatar_a, self.f_speak)
+                self.avatar_b_has_dim = self.avatar_b_exists and self.obs.has_filter(self.avatar_b, self.f_dim)
+                self.avatar_b_has_speak = self.avatar_b_exists and self.obs.has_filter(self.avatar_b, self.f_speak)
             except Exception:
                 self.avatar_a_exists = False
                 self.avatar_b_exists = False
+                self.avatar_a_has_dim = False
+                self.avatar_a_has_speak = False
+                self.avatar_b_has_dim = False
+                self.avatar_b_has_speak = False
         else:
             self.avatar_a_exists = False
             self.avatar_b_exists = False
+            self.avatar_a_has_dim = False
+            self.avatar_a_has_speak = False
+            self.avatar_b_has_dim = False
+            self.avatar_b_has_speak = False
+
+        if self.avatar_mode == "png":
+            missing = []
+            if not self.f_dim or not self.f_speak:
+                missing.append("FILTER_DIM/FILTER_SPEAK must be set for PNG highlight")
+            if not self.avatar_a_exists:
+                missing.append(f"AVATAR_A_SOURCE '{self.avatar_a}' not found in OBS")
+            if not self.avatar_b_exists:
+                missing.append(f"AVATAR_B_SOURCE '{self.avatar_b}' not found in OBS")
+            if self.avatar_a_exists and not self.avatar_a_has_dim:
+                missing.append(f"Filter '{self.f_dim}' missing on {self.avatar_a}")
+            if self.avatar_a_exists and not self.avatar_a_has_speak:
+                missing.append(f"Filter '{self.f_speak}' missing on {self.avatar_a}")
+            if self.avatar_b_exists and not self.avatar_b_has_dim:
+                missing.append(f"Filter '{self.f_dim}' missing on {self.avatar_b}")
+            if self.avatar_b_exists and not self.avatar_b_has_speak:
+                missing.append(f"Filter '{self.f_speak}' missing on {self.avatar_b}")
+            if missing:
+                raise RuntimeError("OBS highlight setup error:\\n- " + "\\n- ".join(missing))
         api_key = _env("HEYGEN_API_KEY", default="").strip()
         if self.streaming_mode:
             if not api_key:
-                raise RuntimeError("HEYGEN_API_KEY is required when HEYGEN_STREAMING=1")
+                raise RuntimeError("HEYGEN_API_KEY is required when AVATAR_MODE=heygen_stream (or HEYGEN_STREAMING=1)")
             if not ((self.stream_avatar_a or self.stream_avatar_id_a) and (self.stream_avatar_b or self.stream_avatar_id_b)):
                 raise RuntimeError(
                     "HEYGEN_STREAM_AVATAR_A/B (or HEYGEN_AVATAR_NAME_A/B) is required for streaming mode."
@@ -285,7 +318,7 @@ class Orchestrator:
             self.stream_client = HeygenStreamClient(HeygenStreamConfig(api_key=api_key))
         elif self.video_mode:
             if not api_key:
-                raise RuntimeError("HEYGEN_API_KEY is required when VIDEO_MODE=1")
+                raise RuntimeError("HEYGEN_API_KEY is required when AVATAR_MODE=heygen_video (or VIDEO_MODE=1)")
             if self.heygen_character_type not in ("avatar", "talking_photo"):
                 raise RuntimeError("HEYGEN_CHARACTER_TYPE must be avatar or talking_photo.")
             if self.heygen_character_type == "avatar":
@@ -914,6 +947,11 @@ class Orchestrator:
                 self._last_stage = stage
             except Exception as e:
                 print(f"[overlay] warn: {e}")
+            if (not self.video_mode) and (not self.streaming_mode):
+                try:
+                    self.obs.set_media_file(media_input, media_path)
+                except Exception as e:
+                    print(f"[obs] warn: set_media_file failed: {e}")
             try:
                 is_a = (turn.speaker == "A")
 
@@ -931,6 +969,9 @@ class Orchestrator:
                         self.obs.set_filter_enabled(self.avatar_b, self.f_dim, is_a)
             except Exception as e:
                 print(f"[highlight] warn: {e}")
+            if self.enable_highlight and (not self.video_mode) and (not self.streaming_mode):
+                if self.highlight_pre_delay_s > 0:
+                    time.sleep(self.highlight_pre_delay_s)
             if self.streaming_mode:
                 self._ensure_stream_sessions()
                 session = self.stream_sessions.get(turn.speaker)
@@ -954,8 +995,6 @@ class Orchestrator:
                 self._write_transcript(turn)
                 time.sleep(turn.duration_est_s)
                 return turn
-            if not self.video_mode:
-                self.obs.set_media_file(media_input, media_path)
             self.obs.restart_media(media_input)
             if self.video_mode:
                 ok = self.obs.wait_media_playing(media_input, timeout_s=self.media_start_timeout_s)
@@ -987,10 +1026,17 @@ class Orchestrator:
             except Exception as e:
                 print(f"[heygen_stream] session init error: {e}")
                 raise
+        prebuffer_total = int(os.getenv("PREBUFFER_TOTAL_TURNS", "0"))
         prebuffer_n = int(os.getenv("PREBUFFER_TURNS_PER_SPEAKER", "0"))
-        if prebuffer_n > 0:
+        if prebuffer_total > 0:
+            total = prebuffer_total
+            print(f"[prefetch] prebuffering {total} turns total...")
+        elif prebuffer_n > 0:
             total = prebuffer_n * 2
             print(f"[prefetch] prebuffering {prebuffer_n} turns per speaker ({total} total)...")
+        else:
+            total = 0
+        if total > 0:
             max_errors = int(os.getenv("PREBUFFER_MAX_ERRORS", "10"))
             retry_sleep = float(os.getenv("PREBUFFER_RETRY_S", "3.0"))
             errors = 0
@@ -1007,6 +1053,19 @@ class Orchestrator:
                         break
                     time.sleep(retry_sleep)
             print("[prefetch] prebuffer complete ✅")
+        auto_stream = os.getenv("OBS_AUTO_START_STREAM", "0").strip() == "1"
+        apply_stream = os.getenv("OBS_STREAM_APPLY", "1").strip() != "0"
+        if auto_stream and self.obs:
+            try:
+                if apply_stream:
+                    applied = self.obs.apply_stream_settings_from_env()
+                    if applied:
+                        print("[obs] stream settings applied ✅")
+                print("[obs] starting stream...")
+                self.obs.start_stream()
+                print("[obs] stream started ✅")
+            except Exception as e:
+                raise RuntimeError(f"OBS auto-stream failed: {e}")
         self.start_prefetch()
         while True:
             self.play_next()

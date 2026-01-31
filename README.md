@@ -42,33 +42,71 @@
 - Длина реплики: по умолчанию 1–2 предложения (`MAX_SENTENCES=2`).
 - Длина эфира: 25 ходов с финальными раундами и закрытием (`MAX_TURNS=25`).
 
-## Быстрый старт (HeyGen Streaming)
-1) Заполни `.env` по образцу `.env.example`:
-   - `STREAM_MODE=heygen`
-   - `HEYGEN_API_KEY`
-   - `HEYGEN_STREAM_AVATAR_A/B` (или `HEYGEN_STREAM_AVATAR_ID_A/B`)
-   - `HEYGEN_STREAM_AUTH_MODE=api_key` (по умолчанию, как в документации)
-2) Запусти:
-   - `python -m src.stream_server` (или выставь `STREAM_SERVER=1` и запускай `src.main`)
-   - `python -m src.main`
-3) В OBS добавь **Browser Source**:
-   - `http://127.0.0.1:8099/agent.html?agent=A`
-   - `http://127.0.0.1:8099/agent.html?agent=B`
+## OBS preset (AI_Avatars_3_modes.json)
+В проекте есть конфигурация OBS `obs/AI_Avatars_3_modes.json` со сценами/источниками:
+- Сцены: `SCENE_PNG`, `SCENE_STREAM`, `SCENE_VIDEO_A`, `SCENE_VIDEO_B`, `SCENE_IDLE`, `SCENE_OVERLAY`
+- Источники: `PNG_AVATAR_A/B`, `STREAM_AVATAR_A/B`, `MEDIA_A_MP4`, `MEDIA_B_MP4`, `AUDIO_PLAYER`, `TXT_*`
 
-## Быстрый старт (mp4‑рендер, без стриминга)
-1) В `.env`:
-   - `STREAM_MODE=` (пусто)
-   - `VIDEO_MODE=1`
-   - `HEYGEN_CHARACTER_TYPE=avatar`
-   - `HEYGEN_AVATAR_ID_A/B` (из `List All Avatars (V2)`)
-   - `VIDEO_PLAYER_A=MEDIA_A_MP4`, `VIDEO_PLAYER_B=MEDIA_B_MP4`
-   - `PREBUFFER_TURNS_PER_SPEAKER=3` (если хочешь заранее сгенерировать ролики)
-   - `HEYGEN_MAX_RETRIES=3` (повторы при 5xx от HeyGen)
-   - `HEYGEN_STATUS_MAX_RETRIES=3` (повторы при сбоях status)
-2) В OBS добавь **Media Source**:
-   - `MEDIA_A_MP4`, `MEDIA_B_MP4` (файл любой, будет заменяться скриптом)
-3) Запуск:
-   - `python -m src.main`
+Переключение режимов — только через `.env` (OBS не трогаем).  
+Режим выбирается одной переменной `AVATAR_MODE` (она имеет приоритет над legacy‑флагами).
+Можно включить `OBS_STRICT=1`, чтобы падать сразу при несовпадении имен источников/фильтров.
+
+## Quickstart: режим 1 (PNG + TTS, рекомендован)
+1) Скопируй `.env.example` → `.env`
+2) Убедись, что `AVATAR_MODE=png` и источники соответствуют OBS‑конфигу
+3) Запуск: `python -m src.main`
+
+Транскрипт пишется в `TRANSCRIPT_PATH`.
+
+## Выбор режима (через .env)
+Важно: HeyGen может требовать платного плана и имеет лимиты/квоты.
+
+### `AVATAR_MODE=png` (PNG + TTS, рекомендован)
+Использует сцены/источники по умолчанию из `.env.example`:
+`SCENE_PNG`, `PNG_AVATAR_A/B`, `AUDIO_PLAYER`.
+
+### `AVATAR_MODE=heygen_stream` (HeyGen Streaming)
+Нужно переключить сцены/источники под стриминг:
+`SCENE_STREAM`, `STREAM_AVATAR_A/B`.  
+Также требуется `HEYGEN_API_KEY` и запуск `stream_server`.
+В OBS Browser Source:
+- `http://127.0.0.1:8099/agent.html?agent=A`
+- `http://127.0.0.1:8099/agent.html?agent=B`
+
+### `AVATAR_MODE=heygen_video` (HeyGen MP4)
+Нужно переключить сцены под видео:
+`SCENE_VIDEO_A`, `SCENE_VIDEO_B`, idle = `SCENE_IDLE`, источники `MEDIA_A_MP4`, `MEDIA_B_MP4`.  
+Рекомендуется оставить тайминги `SCENE_SWITCH_DELAY_S` и `MEDIA_START_*`.
+Чтобы сначала сгенерировать N видео, установи `PREBUFFER_TOTAL_TURNS=N` (например, 20).
+
+### `AVATAR_MODE=text` (только текст)
+Без OBS/TTS, только транскрипт.
+
+Примечание: в текущем OBS конфиге нет `SCENE_VIDEO_IDLE`, поэтому idle‑сцена — `SCENE_IDLE`.
+
+## Стрим на YouTube
+1) Настрой трансляцию в OBS: выбери сервис YouTube и укажи Stream Key (или RTMPS URL).
+2) Запусти проект как обычно (`python -m src.main`).
+3) Опционально: `OBS_AUTO_START_STREAM=1` — автостарт стрима после prebuffer (если он включён).
+4) Если хочешь настроить стрим из `.env`, задай:
+   - `OBS_STREAM_SERVICE_TYPE=rtmp_common`
+   - `OBS_STREAM_SERVICE=YouTube - RTMPS` (или другое имя сервиса из OBS)
+   - `OBS_STREAM_KEY=...`
+   - Опционально `OBS_STREAM_SERVER=...`
+   - И включи `OBS_STREAM_APPLY=1`
+
+## Смена темы через YouTube чат
+1) `YOUTUBE_CHAT_ENABLE=1`
+2) Укажи `YOUTUBE_BROADCAST_ID` или `YOUTUBE_LIVE_CHAT_ID`
+3) Авторизация: либо `YOUTUBE_API_KEY`, либо OAuth (`YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN`)
+4) Команда в чате: `!topic новая тема` (префикс настраивается через `YOUTUBE_TOPIC_PREFIX`)
+
+## FAQ
+- Чёрный экран: проверь корректность `VIDEO_PLAYER_A/B` или `AUDIO_PLAYER`, увеличь `MEDIA_START_TIMEOUT_S`, `MEDIA_START_RETRIES`, добавь `SCENE_SWITCH_DELAY_S`.
+- Первые медиа не стартуют: включи `PREBUFFER_TURNS_PER_SPEAKER=2` и проверь `MEDIA_START_*` тайминги.
+- Нет подсветки: проверь `AVATAR_A_SOURCE/AVATAR_B_SOURCE` и фильтры `FILTER_DIM/FILTER_SPEAK` на обоих источниках, включи `OBS_STRICT=1`.
+- Нет текста на оверлеях: проверь `OVERLAY_TOPIC/OVERLAY_STAGE/OVERLAY_SPEAKER` и соответствующие источники в OBS.
+- В streaming режиме “No session yet”: нет активной сессии — проверь `HEYGEN_API_KEY`, аватары и что `stream_server` запущен.
 
 ## YouTube chat → topic control
 Включи `YOUTUBE_CHAT_ENABLE=1` и заполни:

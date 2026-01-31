@@ -33,7 +33,7 @@
   </head>
   <body>
     <video id="media" autoplay playsinline></video>
-    <div id="status">waiting for session…</div>
+    <div id="status">No session yet</div>
     <script>
       const statusEl = document.getElementById("status");
       const videoEl = document.getElementById("media");
@@ -51,18 +51,23 @@
         try {
           const res = await fetch(`/api/session?agent=${encodeURIComponent(agent)}`, { cache: "no-store" });
           if (!res.ok) {
-            setStatus(`no session (${res.status})`);
+            if (res.status === 404) {
+              setStatus("No session yet");
+            } else {
+              setStatus(`Session error (${res.status})`);
+            }
             return null;
           }
           return await res.json();
         } catch (err) {
-          setStatus(`session error`);
+          setStatus("Session error");
           return null;
         }
       }
 
       async function connect(session) {
         if (!session || !session.url || !session.access_token) {
+          setStatus("No session yet");
           return;
         }
         if (session.session_id === currentSessionId) {

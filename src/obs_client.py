@@ -113,9 +113,19 @@ class ObsClient:
             resp = self.ws.get_source_filter_list(source_name)
         except Exception:
             return False
-        items = getattr(resp, "filters", []) or []
+        items = getattr(resp, "filters", None)
+        if items is None and isinstance(resp, dict):
+            items = resp.get("filters")
+        items = items or []
         for f in items:
-            name = getattr(f, "filter_name", None)
+            if isinstance(f, dict):
+                name = f.get("filterName") or f.get("filter_name") or f.get("name")
+            else:
+                name = (
+                    getattr(f, "filter_name", None)
+                    or getattr(f, "filterName", None)
+                    or getattr(f, "name", None)
+                )
             if name == filter_name:
                 return True
         return False
@@ -160,8 +170,68 @@ class ObsClient:
             time.sleep(poll_s)
         return False
 
+    def start_stream(self) -> None:
+        self.ws.start_stream()
+
+    def set_stream_service_settings(self, service_type: str, settings: dict) -> None:
+        if not hasattr(self.ws, "set_stream_service_settings"):
+            raise RuntimeError("OBS WebSocket method set_stream_service_settings not available")
+        try:
+            self.ws.set_stream_service_settings(
+                stream_service_type=service_type,
+                stream_service_settings=settings,
+            )
+            return
+        except TypeError:
+            pass
+        try:
+            self.ws.set_stream_service_settings(service_type, settings)
+            return
+        except TypeError:
+            pass
+        self.ws.set_stream_service_settings(
+            streamServiceType=service_type,
+            streamServiceSettings=settings,
+        )
+
+    def apply_stream_settings_from_env(self) -> bool:
+        service_type = os.getenv("OBS_STREAM_SERVICE_TYPE", "").strip()
+        service = os.getenv("OBS_STREAM_SERVICE", "").strip()
+        server = os.getenv("OBS_STREAM_SERVER", "").strip()
+        key = os.getenv("OBS_STREAM_KEY", "").strip()
+        use_auth = os.getenv("OBS_STREAM_USE_AUTH", "0").strip() == "1"
+        username = os.getenv("OBS_STREAM_USERNAME", "").strip()
+        password = os.getenv("OBS_STREAM_PASSWORD", "").strip()
+
+        if not (service or server or key):
+            return False
+        if not key:
+            raise RuntimeError("OBS_STREAM_KEY is required to apply stream settings")
+
+        if not service_type:
+            service_type = "rtmp_common" if service else "rtmp_custom"
+
+        settings = {"key": key}
+        if service_type == "rtmp_common":
+            if not service:
+                raise RuntimeError("OBS_STREAM_SERVICE is required for rtmp_common")
+            settings["service"] = service
+            if server:
+                settings["server"] = server
+        else:
+            if not server:
+                raise RuntimeError("OBS_STREAM_SERVER is required for rtmp_custom")
+            settings["server"] = server
+            settings["use_auth"] = bool(use_auth)
+            if use_auth:
+                settings["username"] = username
+                settings["password"] = password
+
+        self.set_stream_service_settings(service_type, settings)
+        return True
+
     # --- self check ---
-    def self_check(self, *, check_media: bool = True) -> None:
+    def self_check(self, *, check_media: bool = True, strict: Optional[bool] = None) -> None:
         print("[obs] connecting...")
         self.connect()
         print("[obs] connected ✅")
@@ -173,6 +243,55 @@ class ObsClient:
         if check_media:
             self.ensure_input_exists(self.cfg.audio_player)
         print("[obs] scenes/inputs exist ✅")
+
+        if strict is None:
+            strict = os.getenv("OBS_STRICT", "").strip() == "1"
+        if strict:
+            print("[obs] strict check enabled...")
+            missing: list[str] = []
+
+            def _check_input(env_key: str, default: str) -> str:
+                name = (os.getenv(env_key, default) or "").strip()
+                if not name:
+                    missing.append(f"{env_key} is empty (set to OBS source name)")
+                    return ""
+                try:
+                    self.ensure_input_exists(name)
+                except Exception:
+                    missing.append(
+                        f"{env_key} -> missing OBS input '{name}'. "
+                        f"Create/rename source to '{name}' or set {env_key}."
+                    )
+                return name
+
+            def _check_filter(source_name: str, env_key: str, default: str) -> None:
+                if not source_name:
+                    return
+                fname = (os.getenv(env_key, default) or "").strip()
+                if not fname:
+                    missing.append(f"{env_key} is empty (set to filter name on '{source_name}')")
+                    return
+                if not self.has_filter(source_name, fname):
+                    missing.append(
+                        f"{env_key} -> filter '{fname}' missing on source '{source_name}'. "
+                        f"Add filter or set {env_key}."
+                    )
+
+            _check_input("OVERLAY_TOPIC", "TXT_TOPIC")
+            _check_input("OVERLAY_STAGE", "TXT_STAGE")
+            _check_input("OVERLAY_SPEAKER", "TXT_SPEAKER")
+
+            avatar_a = _check_input("AVATAR_A_SOURCE", "AVATAR_A")
+            avatar_b = _check_input("AVATAR_B_SOURCE", "AVATAR_B")
+
+            _check_filter(avatar_a, "FILTER_DIM", "DIM")
+            _check_filter(avatar_a, "FILTER_SPEAK", "SPEAK")
+            _check_filter(avatar_b, "FILTER_DIM", "DIM")
+            _check_filter(avatar_b, "FILTER_SPEAK", "SPEAK")
+
+            if missing:
+                msg = "OBS strict check failed:\\n- " + "\\n- ".join(missing)
+                raise RuntimeError(msg)
 
         if check_media:
             print("[obs] switching to SCENE_A...")
