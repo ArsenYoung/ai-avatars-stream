@@ -1,24 +1,24 @@
 # AI Avatars Stream — MVP
 
-## Demo / Артефакты
-YouTube VOD: [https://www.youtube.com/watch?v=4UQxmndK8uw](https://www.youtube.com/watch?v=4UQxmndK8uw)  
-Transcript (jsonl): [transcripts/transcript.jsonl](transcripts/transcript.jsonl)  
-Transcript содержит ts/speaker/llm_latency/tts_latency и соответствует VOD.  
-How to run (png mode): `python -m src.main`  
-What you’ll see: два PNG‑аватара, подсветка SPEAK/DIM, голос, автономный диалог
+## Демо / Артефакты
+Запись на YouTube (VOD): [https://www.youtube.com/watch?v=4UQxmndK8uw](https://www.youtube.com/watch?v=4UQxmndK8uw)  
+Транскрипт (jsonl): [transcripts/transcript.jsonl](transcripts/transcript.jsonl)  
+Транскрипт содержит ts/speaker/llm_latency/tts_latency и соответствует VOD.  
+Как запустить (PNG‑режим): `python -m src.main`  
+Что увидите: два PNG‑аватара, подсветка SPEAK/DIM, голос, автономный диалог
 
-Проект: **MVP** — PNG‑аватары + live LLM→TTS + OBS управление сценами + YouTube Live; HeyGen/YouTube chat — опционально.
+Проект: **MVP** — PNG‑аватары + LLM→TTS в реальном времени + OBS управление сценами + YouTube Live; HeyGen/YouTube чат — опционально.
 
 ## Скриншоты
 Кадр из видео/OBS (две PNG + активный спикер, DIM/SPEAK):  
 ![OBS PNG + DIM/SPEAK](docs/screenshots/obs.png)
 
 Кадр с логом/транскриптом (llm_latency/tts_latency):  
-![Transcript + latency](docs/screenshots/transcript.png)
+![Transcript + latency](docs/screenshots/worker.png)
 
 ## Соответствие ТЗ
 ✅ 2 агента, PNG‑аватары  
-✅ live LLM→TTS  
+✅ LLM→TTS в реальном времени  
 ✅ автономно (без ручного управления)  
 ✅ OBS → YouTube Live  
 ✅ контекст: history + running summary  
@@ -42,18 +42,18 @@ What you’ll see: два PNG‑аватара, подсветка SPEAK/DIM, г
 - Длина реплики: по умолчанию 1–2 предложения (`MAX_SENTENCES=2`).
 - Длина эфира: 25 ходов с финальными раундами и закрытием (`MAX_TURNS=25`).
 
-## OBS preset (AI_Avatars_3_modes.json)
+## OBS‑пресет (AI_Avatars_3_modes.json)
 В проекте есть конфигурация OBS `obs/AI_Avatars_3_modes.json` со сценами/источниками:
 - Сцены: `SCENE_PNG`, `SCENE_STREAM`, `SCENE_VIDEO_A`, `SCENE_VIDEO_B`, `SCENE_IDLE`, `SCENE_OVERLAY`
 - Источники: `PNG_AVATAR_A/B`, `STREAM_AVATAR_A/B`, `MEDIA_A_MP4`, `MEDIA_B_MP4`, `AUDIO_PLAYER`, `TXT_*`
 
-Импорт в OBS: Scene Collection → Import → `obs/AI_Avatars_3_modes.json`.
+Импорт в OBS: Коллекции сцен → Импорт → `obs/AI_Avatars_3_modes.json`.
 
 Переключение режимов — только через `.env` (OBS не трогаем).  
 Режим выбирается одной переменной `AVATAR_MODE` (она имеет приоритет над legacy‑флагами).
 Можно включить `OBS_STRICT=1`, чтобы падать сразу при несовпадении имен источников/фильтров.
 
-## Quickstart: режим 1 (PNG + TTS, рекомендован)
+## Быстрый старт: режим 1 (PNG + TTS, рекомендован)
 1) Скопируй `.env.example` → `.env`
 2) Убедись, что `AVATAR_MODE=png` и источники соответствуют OBS‑конфигу
 3) Запуск: `python -m src.main`
@@ -68,9 +68,9 @@ What you’ll see: два PNG‑аватара, подсветка SPEAK/DIM, г
 Транскрипт пишется в `TRANSCRIPT_PATH`.
 
 ## Выбор режима (через .env)
-Рекомендуемый для VOD: `AVATAR_MODE=png` (PNG + TTS).  
+Рекомендуемый для записи: `AVATAR_MODE=png` (PNG + TTS).  
 Опционально (платные лимиты): `AVATAR_MODE=heygen_stream` / `AVATAR_MODE=heygen_video`.  
-YouTube chat: включается отдельно через `YOUTUBE_CHAT_ENABLE=1`.
+YouTube чат: включается отдельно через `YOUTUBE_CHAT_ENABLE=1`.
 
 Примечание: в текущем OBS конфиге нет `SCENE_VIDEO_IDLE`, поэтому idle‑сцена — `SCENE_IDLE`.
 
@@ -92,7 +92,7 @@ YouTube chat: включается отдельно через `YOUTUBE_CHAT_ENA
 3) Авторизация: либо `YOUTUBE_API_KEY`, либо OAuth (`YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN`)
 4) Команда в чате: `!topic новая тема` (префикс настраивается через `YOUTUBE_TOPIC_PREFIX`)
 
-## FAQ
+## Частые вопросы
 - Чёрный экран: проверь корректность `VIDEO_PLAYER_A/B` или `AUDIO_PLAYER`, увеличь `MEDIA_START_TIMEOUT_S`, `MEDIA_START_RETRIES`, добавь `SCENE_SWITCH_DELAY_S`.
 - Первые медиа не стартуют: включи `PREBUFFER_TURNS_PER_SPEAKER=2` и проверь `MEDIA_START_*` тайминги.
 - Нет подсветки: проверь `AVATAR_A_SOURCE/AVATAR_B_SOURCE` и фильтры `FILTER_DIM/FILTER_SPEAK` на обоих источниках, включи `OBS_STRICT=1`.
@@ -100,11 +100,11 @@ YouTube chat: включается отдельно через `YOUTUBE_CHAT_ENA
 - В streaming режиме “No session yet”: нет активной сессии — проверь `HEYGEN_API_KEY`, аватары и что `stream_server` запущен.
 - Зависает генерация: выставь `LLM_TIMEOUT_S`/`TTS_TIMEOUT_S` и `BRIDGE_PHRASE*` для автоподстраховки.
 
-## Dev notes
+## Заметки разработчика
 Что уже сделано / планы: `docs/plan_v2.md`, `docs/plan.md`.
 
 Короткий список сделанного:
 - Базовый OBS контур (сцены, `AUDIO_PLAYER`, media restart).
 - Оркестратор (очередь, prefetch, запись транскрипта).
 - LLM/TTS/summary/topic модули.
-- HeyGen Streaming и YouTube chat (опционально).
+- HeyGen Streaming и YouTube чат (опционально).
