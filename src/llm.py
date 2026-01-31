@@ -44,6 +44,20 @@ SKEPTIC_SYSTEM = """Ты Skeptic. Критично проверяешь тези
 class LLMConfig:
     model: str
 
+def _with_timeout(client: OpenAI, timeout_s: float) -> OpenAI:
+    try:
+        return client.with_options(timeout=timeout_s)
+    except Exception:
+        return client
+
+def _bridge_phrase(speaker: str) -> str:
+    common = os.getenv("BRIDGE_PHRASE", "").strip()
+    if common:
+        return common
+    if speaker == "A":
+        return os.getenv("BRIDGE_PHRASE_A", "Коротко: продолжим с ключевого теста.").strip()
+    return os.getenv("BRIDGE_PHRASE_B", "Ок, давай сузим до одного проверяемого теста.").strip()
+
 def _build_input(
     system: str,
     topic: str,
@@ -98,23 +112,44 @@ def generate_turn(
 ) -> Tuple[str, float]:
     t0 = time.time()
     system = SCIENTIST_SYSTEM if speaker == "A" else SKEPTIC_SYSTEM
+    timeout_s = float(os.getenv("LLM_TIMEOUT_S", "30"))
+    client_t = _with_timeout(client, timeout_s)
 
     def _call() -> str:
-        resp = client.responses.create(
-            model=cfg.model,
-            input=_build_input(
-                system,
-                topic,
-                running_summary,
-                history,
-                anchor_case=anchor_case,
-                turn_id=turn_id,
-                extra_rules=extra_rules,
-            ),
-        )
+        try:
+            resp = client_t.responses.create(
+                model=cfg.model,
+                input=_build_input(
+                    system,
+                    topic,
+                    running_summary,
+                    history,
+                    anchor_case=anchor_case,
+                    turn_id=turn_id,
+                    extra_rules=extra_rules,
+                ),
+                timeout=timeout_s,
+            )
+        except TypeError:
+            resp = client_t.responses.create(
+                model=cfg.model,
+                input=_build_input(
+                    system,
+                    topic,
+                    running_summary,
+                    history,
+                    anchor_case=anchor_case,
+                    turn_id=turn_id,
+                    extra_rules=extra_rules,
+                ),
+            )
         return (resp.output_text or "").strip()
 
-    text = retry(_call, name=f"llm_{speaker}")
+    try:
+        text = retry(_call, name=f"llm_{speaker}")
+    except Exception as e:
+        print(f"[llm] error: {e}. using bridge phrase")
+        text = _bridge_phrase(speaker)
     max_sentences = int(os.getenv("MAX_SENTENCES", "2"))
     text = _limit_sentences(text, max_sentences)
     return text, (time.time() - t0)

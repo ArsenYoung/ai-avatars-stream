@@ -166,6 +166,10 @@ class Orchestrator:
         self.voice_b = _env("TTS_VOICE_B", "VOICE_B", default="verse")
         self.prompt_version = _env("PROMPT_VERSION", default="v1")
         self.anchor_case = _env("ANCHOR_CASE", default="").strip()
+        self.bridge_phrase = _env("BRIDGE_PHRASE", default="").strip()
+        self.bridge_phrase_a = _env("BRIDGE_PHRASE_A", default="Коротко: продолжим с ключевого теста.").strip()
+        self.bridge_phrase_b = _env("BRIDGE_PHRASE_B", default="Ок, давай сузим до одного проверяемого теста.").strip()
+        self.tts_chars_per_sec = float(_env("TTS_CHARS_PER_SEC", default="15"))
         self.roundup_every_n = int(_env("ROUNDUP_EVERY_N", default="6"))
         self.steelman_every_n = int(_env("STEELMAN_EVERY_N", default="8"))
         self.steelman_a_offset = int(_env("STEELMAN_A_OFFSET", default="4"))
@@ -826,10 +830,21 @@ class Orchestrator:
             audio_path = ""
             tts_latency = 0.0
             video_path = ""
+            duration_est_s = 0.0
         else:
             voice = self.voice_a if speaker == "A" else self.voice_b
             audio_path = self._audio_out_path(next_turn_id, speaker)
-            tts_latency = self.tts.speak(text=text, voice=voice, out_path=audio_path)
+            duration_est_s = 0.0
+            try:
+                tts_latency = self.tts.speak(text=text, voice=voice, out_path=audio_path)
+            except Exception as e:
+                print(f"[tts] error: {e}. using bridge phrase + no audio")
+                bridge = self.bridge_phrase or (self.bridge_phrase_a if speaker == "A" else self.bridge_phrase_b)
+                if bridge:
+                    text = bridge
+                audio_path = ""
+                tts_latency = 0.0
+                duration_est_s = max(2.0, len(text) / max(1.0, self.tts_chars_per_sec))
             video_path = ""
             if self.video_mode:
                 cached_path = self._video_out_path(next_turn_id, speaker)
@@ -853,6 +868,7 @@ class Orchestrator:
             tts_latency=tts_latency,
             model=self.llm_cfg.model,
             prompt_version=self.prompt_version,
+            duration_est_s=duration_est_s,
         )
 
         with self._queue_lock:
@@ -947,7 +963,7 @@ class Orchestrator:
                 self._last_stage = stage
             except Exception as e:
                 print(f"[overlay] warn: {e}")
-            if (not self.video_mode) and (not self.streaming_mode):
+            if (not self.video_mode) and (not self.streaming_mode) and media_path:
                 try:
                     self.obs.set_media_file(media_input, media_path)
                 except Exception as e:
@@ -994,6 +1010,11 @@ class Orchestrator:
                 turn.duration_est_s = self._estimate_stream_duration(turn.text)
                 self._write_transcript(turn)
                 time.sleep(turn.duration_est_s)
+                return turn
+            if (not self.video_mode) and (not self.streaming_mode) and not media_path:
+                print("[tts] warn: no audio file; continuing with estimated timing")
+                self._write_transcript(turn)
+                time.sleep(max(self.idle_sleep_s, turn.duration_est_s or self.idle_sleep_s))
                 return turn
             self.obs.restart_media(media_input)
             if self.video_mode:
