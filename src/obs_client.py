@@ -2,7 +2,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from obsws_python import ReqClient
@@ -25,7 +25,25 @@ class ObsConfig:
 
 
 class ObsClient:
-    def __init__(self, cfg: ObsConfig):
+    def __init__(
+        self,
+        cfg: Optional[ObsConfig] = None,
+        *,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        password: Optional[str] = None,
+    ):
+        if cfg is None:
+            cfg = ObsConfig(
+                host=host or os.getenv("OBS_HOST", "127.0.0.1"),
+                port=int(port if port is not None else os.getenv("OBS_PORT", "4455")),
+                password=password or os.getenv("OBS_PASSWORD", ""),
+                scene_a=os.getenv("SCENE_A", "SCENE_A"),
+                scene_b=os.getenv("SCENE_B", "SCENE_B"),
+                scene_idle=os.getenv("SCENE_IDLE", "SCENE_IDLE"),
+                audio_player=os.getenv("AUDIO_PLAYER", "AUDIO_PLAYER"),
+                test_wav=os.getenv("TEST_WAV", "audio/test.wav"),
+            )
         self.cfg = cfg
         self.ws = None
 
@@ -78,6 +96,44 @@ class ObsClient:
         # For Media Source, the setting key is typically "local_file"
         self.ws.set_input_settings(input_name, {"local_file": abs_path}, overlay=True)
 
+    def set_text(self, input_name: str, text: str) -> None:
+        # Для Text (FreeType 2) / Text (GDI+) обычно ключ "text"
+        # Если источник читает текст из файла, "text" игнорируется — отключаем это.
+        self.ws.set_input_settings(
+            input_name,
+            {"text": text, "read_from_file": False},
+            overlay=True,
+        )
+
+    def set_filter_enabled(self, source_name: str, filter_name: str, enabled: bool) -> None:
+        self.ws.set_source_filter_enabled(source_name, filter_name, enabled)
+
+    def has_filter(self, source_name: str, filter_name: str) -> bool:
+        try:
+            resp = self.ws.get_source_filter_list(source_name)
+        except Exception:
+            return False
+        items = getattr(resp, "filters", []) or []
+        for f in items:
+            name = getattr(f, "filter_name", None)
+            if name == filter_name:
+                return True
+        return False
+
+    def source_exists(self, source_name: str) -> bool:
+        try:
+            self.ws.get_input_settings(source_name)
+            return True
+        except Exception:
+            return False
+
+    def set_scene_item_enabled(self, scene_name: str, source_name: str, enabled: bool) -> None:
+        item = self.ws.get_scene_item_id(scene_name, source_name)
+        scene_item_id = getattr(item, "scene_item_id", None)
+        if scene_item_id is None:
+            raise RuntimeError(f"OBS scene item not found: scene={scene_name} source={source_name}")
+        self.ws.set_scene_item_enabled(scene_name, scene_item_id, enabled)
+
     def restart_media(self, input_name: str) -> None:
         self.ws.trigger_media_input_action(input_name, "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART")
 
@@ -105,7 +161,7 @@ class ObsClient:
         return False
 
     # --- self check ---
-    def self_check(self) -> None:
+    def self_check(self, *, check_media: bool = True) -> None:
         print("[obs] connecting...")
         self.connect()
         print("[obs] connected ✅")
@@ -114,30 +170,32 @@ class ObsClient:
         self.ensure_scene_exists(self.cfg.scene_a)
         self.ensure_scene_exists(self.cfg.scene_b)
         self.ensure_scene_exists(self.cfg.scene_idle)
-        self.ensure_input_exists(self.cfg.audio_player)
+        if check_media:
+            self.ensure_input_exists(self.cfg.audio_player)
         print("[obs] scenes/inputs exist ✅")
 
-        print("[obs] switching to SCENE_A...")
-        self.set_scene(self.cfg.scene_a)
-        time.sleep(0.2)
+        if check_media:
+            print("[obs] switching to SCENE_A...")
+            self.set_scene(self.cfg.scene_a)
+            time.sleep(0.2)
 
-        print(f"[obs] setting test wav: {self.cfg.test_wav}")
-        self.set_media_file(self.cfg.audio_player, self.cfg.test_wav)
+            print(f"[obs] setting test wav: {self.cfg.test_wav}")
+            self.set_media_file(self.cfg.audio_player, self.cfg.test_wav)
 
-        print("[obs] restart media...")
-        self.restart_media(self.cfg.audio_player)
+            print("[obs] restart media...")
+            self.restart_media(self.cfg.audio_player)
 
-        ok = self.wait_media_playing(self.cfg.audio_player, timeout_s=5.0)
-        if not ok:
-            st = self.ws.get_media_input_status(self.cfg.audio_player)
-            raise RuntimeError(f"Media did not start playing. media_state={getattr(st, 'media_state', None)}")
+            ok = self.wait_media_playing(self.cfg.audio_player, timeout_s=5.0)
+            if not ok:
+                st = self.ws.get_media_input_status(self.cfg.audio_player)
+                raise RuntimeError(f"Media did not start playing. media_state={getattr(st, 'media_state', None)}")
 
-        print("[obs] media playing ✅")
+            print("[obs] media playing ✅")
 
-        print("[obs] switching to SCENE_B...")
-        self.set_scene(self.cfg.scene_b)
-        time.sleep(0.2)
-        print("[obs] switched ✅")
+            print("[obs] switching to SCENE_B...")
+            self.set_scene(self.cfg.scene_b)
+            time.sleep(0.2)
+            print("[obs] switched ✅")
 
         print("[obs] done ✅")
 

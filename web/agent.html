@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>HeyGen Stream Agent</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+      }
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      #status {
+        position: absolute;
+        left: 10px;
+        bottom: 10px;
+        font: 12px/1.2 monospace;
+        color: rgba(255,255,255,0.7);
+        background: rgba(0,0,0,0.35);
+        padding: 6px 8px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="media" autoplay playsinline></video>
+    <div id="status">waiting for session…</div>
+    <script>
+      const statusEl = document.getElementById("status");
+      const videoEl = document.getElementById("media");
+      const agent = (new URLSearchParams(location.search).get("agent") || "A").toUpperCase();
+
+      let room = null;
+      let currentSessionId = null;
+      let mediaStream = new MediaStream();
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      async function fetchSession() {
+        try {
+          const res = await fetch(`/api/session?agent=${encodeURIComponent(agent)}`, { cache: "no-store" });
+          if (!res.ok) {
+            setStatus(`no session (${res.status})`);
+            return null;
+          }
+          return await res.json();
+        } catch (err) {
+          setStatus(`session error`);
+          return null;
+        }
+      }
+
+      async function connect(session) {
+        if (!session || !session.url || !session.access_token) {
+          return;
+        }
+        if (session.session_id === currentSessionId) {
+          return;
+        }
+        currentSessionId = session.session_id;
+        setStatus(`connecting ${currentSessionId}…`);
+
+        if (room) {
+          room.disconnect();
+          room = null;
+        }
+        mediaStream = new MediaStream();
+        videoEl.srcObject = mediaStream;
+
+        room = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+
+        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === "video") {
+            mediaStream.addTrack(track.mediaStreamTrack);
+          } else if (track.kind === "audio") {
+            mediaStream.addTrack(track.mediaStreamTrack);
+          }
+          videoEl.srcObject = mediaStream;
+          videoEl.play().catch(() => {});
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+          try {
+            mediaStream.removeTrack(track.mediaStreamTrack);
+          } catch (err) {
+            // ignore
+          }
+        });
+
+        room.on(LivekitClient.RoomEvent.Disconnected, () => {
+          setStatus("disconnected");
+          currentSessionId = null;
+        });
+
+        try {
+          await room.connect(session.url, session.access_token);
+          setStatus(`connected ${session.session_id}`);
+        } catch (err) {
+          setStatus("connect failed");
+          currentSessionId = null;
+        }
+      }
+
+      async function loop() {
+        while (true) {
+          const session = await fetchSession();
+          if (session) {
+            await connect(session);
+          }
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+
+      loop();
+    </script>
+  </body>
+</html>

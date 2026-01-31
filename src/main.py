@@ -5,6 +5,15 @@ from dotenv import load_dotenv
 
 from src.obs_client import ObsClient, ObsConfig
 from src.orchestrator import Orchestrator
+from src.stream_server import StreamServer
+
+
+def _env(*names: str, default: str | None = None) -> str | None:
+    for name in names:
+        val = os.getenv(name)
+        if val is not None and str(val).strip() != "":
+            return val
+    return default
 
 
 def _parse_args() -> argparse.Namespace:
@@ -27,30 +36,51 @@ def main():
         os.environ["TEXT_ONLY_SLEEP_S"] = str(args.text_sleep)
 
     obs = ObsClient(ObsConfig(
-        host=os.getenv("OBS_HOST", "127.0.0.1"),
-        port=int(os.getenv("OBS_PORT", "4455")),
-        password=os.getenv("OBS_PASSWORD", ""),
-        scene_a=os.getenv("SCENE_A", "SCENE_A"),
-        scene_b=os.getenv("SCENE_B", "SCENE_B"),
-        scene_idle=os.getenv("SCENE_IDLE", "SCENE_IDLE"),
-        audio_player=os.getenv("AUDIO_PLAYER", "AUDIO_PLAYER"),
-        test_wav=os.getenv("TEST_WAV", "audio/test.wav"),
+        host=_env("OBS_HOST", default="127.0.0.1") or "127.0.0.1",
+        port=int(_env("OBS_PORT", default="4455") or "4455"),
+        password=_env("OBS_PASSWORD", default="") or "",
+        scene_a=_env("SCENE_A", "OBS_SCENE_A", default="SCENE_A") or "SCENE_A",
+        scene_b=_env("SCENE_B", "OBS_SCENE_B", default="SCENE_B") or "SCENE_B",
+        scene_idle=_env("SCENE_IDLE", "OBS_SCENE_IDLE", default="SCENE_IDLE") or "SCENE_IDLE",
+        audio_player=_env("AUDIO_PLAYER", "OBS_AUDIO_INPUT", default="AUDIO_PLAYER") or "AUDIO_PLAYER",
+        test_wav=_env("TEST_WAV", default="audio/test.wav") or "audio/test.wav",
     ))
+
+    stream_mode = (_env("STREAM_MODE", default="") or "").strip().lower()
+    streaming = (_env("HEYGEN_STREAMING", default="") or "").strip() == "1" or stream_mode == "heygen"
+    video_mode = (_env("VIDEO_MODE", default="") or "").strip() == "1" and not streaming and os.getenv("TEXT_ONLY", "").strip() != "1"
+
     if os.getenv("TEXT_ONLY", "").strip() != "1":
-        obs.self_check()  # CP2: проверка сцен/источника + тестовый restart
+        # streaming uses Browser Source; video_mode uses MP4 Media Sources (no AUDIO_PLAYER check)
+        obs.self_check(check_media=(not streaming and not video_mode))
+        if video_mode:
+            # Ensure video Media Sources exist for mp4 playback
+            video_player_a = _env("VIDEO_PLAYER_A", default="MEDIA_A_MP4") or "MEDIA_A_MP4"
+            video_player_b = _env("VIDEO_PLAYER_B", default="MEDIA_B_MP4") or "MEDIA_B_MP4"
+            obs.ensure_input_exists(video_player_a)
+            obs.ensure_input_exists(video_player_b)
+
+    if streaming and (_env("STREAM_SERVER", default="1") or "1") == "1":
+        srv = StreamServer(
+            host=_env("STREAM_SERVER_HOST", default="127.0.0.1") or "127.0.0.1",
+            port=int(_env("STREAM_SERVER_PORT", default="8099") or "8099"),
+            web_root=_env("STREAM_WEB_ROOT", default="web") or "web",
+            session_file=_env("STREAM_SESSION_FILE", default="stream_sessions.json") or "stream_sessions.json",
+        )
+        srv.start()
 
     orch = Orchestrator(
         obs,
-        scene_a=os.environ["SCENE_A"],
-        scene_b=os.environ["SCENE_B"],
-        scene_idle=os.environ["SCENE_IDLE"],
-        audio_player=os.environ["AUDIO_PLAYER"],
+        scene_a=_env("SCENE_A", "OBS_SCENE_A", default="SCENE_A") or "SCENE_A",
+        scene_b=_env("SCENE_B", "OBS_SCENE_B", default="SCENE_B") or "SCENE_B",
+        scene_idle=_env("SCENE_IDLE", "OBS_SCENE_IDLE", default="SCENE_IDLE") or "SCENE_IDLE",
+        audio_player=_env("AUDIO_PLAYER", "OBS_AUDIO_INPUT", default="AUDIO_PLAYER") or "AUDIO_PLAYER",
         audio_dir=os.environ.get("AUDIO_DIR", "audio/preloaded"),
         transcript_path=os.environ.get("TRANSCRIPT_PATH", "transcripts/transcript.jsonl"),
-        history_max=int(os.environ.get("HISTORY_MAX", "48")),
-        min_queue_items=int(os.environ.get("MIN_QUEUE_ITEMS", "2")),
-        poll_ms=int(os.environ.get("POLL_MS", "300")),
-        idle_sleep_s=float(os.environ.get("IDLE_SLEEP_S", "1.0")),
+        history_max=int(_env("HISTORY_MAX", "HISTORY_MAX_TURNS", default="48") or "48"),
+        min_queue_items=int(_env("MIN_QUEUE_ITEMS", "QUEUE_FLOOR", default="2") or "2"),
+        poll_ms=int(_env("POLL_MS", default="300") or "300"),
+        idle_sleep_s=float(_env("IDLE_SLEEP_S", default="1.0") or "1.0"),
     )
     orch.run_forever()
 

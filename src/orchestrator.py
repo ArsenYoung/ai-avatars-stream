@@ -18,6 +18,9 @@ from src.llm import LLMConfig, generate_turn
 from src.summarize import SummarizeConfig, should_summarize, summarize
 from src.topic import TopicConfig, TopicProvider
 from src.tts import TTSConfig, TTS
+from src.heygen import guess_mime
+from src.heygen_stream import HeygenStreamClient, HeygenStreamConfig, StreamSession, write_sessions_file
+from src.retry import retry
 
 
 @dataclass
@@ -26,6 +29,10 @@ class Turn:
     speaker: str              # "A" | "B"
     text: str
     audio_file: str           # absolute path
+    video_file: str = ""
+    stream_session_id: str = ""
+    stream_task_id: str = ""
+    duration_est_s: float = 0.0
     llm_latency: float = 0.0
     tts_latency: float = 0.0
     model: str = ""
@@ -49,6 +56,13 @@ class Orchestrator:
         poll_ms: int = 300,
         idle_sleep_s: float = 1.0,
     ):
+        def _env(*names: str, default: str = "") -> str:
+            for name in names:
+                val = os.getenv(name)
+                if val is not None and str(val).strip() != "":
+                    return str(val)
+            return default
+
         self.obs = obs
         self.scene_a = scene_a
         self.scene_b = scene_b
@@ -71,47 +85,112 @@ class Orchestrator:
 
         self._dur_cache: dict[str, float] = {}
         self._ffprobe = shutil.which("ffprobe")
-        self.playback_pad_s = float(os.getenv("PLAYBACK_PAD_S", "0.15"))
-        self.text_only = os.getenv("TEXT_ONLY", "").strip() == "1"
-        self.text_only_sleep_s = float(os.getenv("TEXT_ONLY_SLEEP_S", "0.5"))
+        self.playback_pad_s = float(_env("PLAYBACK_PAD_S", default="0.15"))
+        self.media_start_timeout_s = float(_env("MEDIA_START_TIMEOUT_S", default="5.0"))
+        self.media_start_retries = int(_env("MEDIA_START_RETRIES", default="2"))
+        self.media_start_retry_sleep_s = float(_env("MEDIA_START_RETRY_SLEEP_S", default="0.2"))
+        self.scene_switch_delay_s = float(_env("SCENE_SWITCH_DELAY_S", default="0.0"))
+        self.text_only = _env("TEXT_ONLY", default="").strip() == "1"
+        self.text_only_sleep_s = float(_env("TEXT_ONLY_SLEEP_S", default="0.5"))
+        stream_mode = _env("STREAM_MODE", default="").strip().lower()
+        self.streaming_mode = _env("HEYGEN_STREAMING", default="").strip() == "1" or stream_mode in {"heygen", "stream", "streaming"}
+        self.video_mode = (not self.text_only) and (not self.streaming_mode) and (_env("VIDEO_MODE", default="").strip() == "1")
+        self.video_dir = Path(os.getenv("VIDEO_DIR", "video/preloaded"))
+        self.video_player_a = os.getenv("VIDEO_PLAYER_A", "MEDIA_A_MP4")
+        self.video_player_b = os.getenv("VIDEO_PLAYER_B", "MEDIA_B_MP4")
+        self.heygen = None
+        self.heygen_dim_w = int(_env("HEYGEN_DIM_W", default="1280"))
+        self.heygen_dim_h = int(_env("HEYGEN_DIM_H", default="720"))
+        self.heygen_poll_s = float(_env("HEYGEN_POLL_S", default="5"))
+        self.heygen_timeout_s = int(_env("HEYGEN_TIMEOUT_S", default="600"))
+        self.heygen_max_retries = int(_env("HEYGEN_MAX_RETRIES", default="3"))
+        self.heygen_status_max_retries = int(_env("HEYGEN_STATUS_MAX_RETRIES", default=str(self.heygen_max_retries)))
+        self.heygen_upload_max_retries = int(_env("HEYGEN_UPLOAD_MAX_RETRIES", default=str(self.heygen_max_retries)))
+        self.heygen_download_max_retries = int(_env("HEYGEN_DOWNLOAD_MAX_RETRIES", default=str(self.heygen_max_retries)))
+        self.heygen_retry_base_delay_s = float(_env("HEYGEN_RETRY_BASE_DELAY_S", default="1.0"))
+        self.heygen_retry_max_delay_s = float(_env("HEYGEN_RETRY_MAX_DELAY_S", default="12.0"))
+        self.heygen_character_type = _env("HEYGEN_CHARACTER_TYPE", default="").strip().lower()
+        self.heygen_avatar_id_a = _env("HEYGEN_AVATAR_ID_A", "HEYGEN_AVATAR_ID", default="")
+        self.heygen_avatar_id_b = _env("HEYGEN_AVATAR_ID_B", "HEYGEN_AVATAR_ID", default="")
+        self.heygen_talking_photo_id_a = (
+            _env("HEYGEN_TALKING_PHOTO_ID_A", "HEYGEN_TALKING_PHOTO_ID", default="")
+        )
+        self.heygen_talking_photo_id_b = (
+            _env("HEYGEN_TALKING_PHOTO_ID_B", "HEYGEN_TALKING_PHOTO_ID", default="")
+        )
+        if not self.heygen_character_type:
+            if self.heygen_talking_photo_id_a or self.heygen_talking_photo_id_b:
+                self.heygen_character_type = "talking_photo"
+            else:
+                self.heygen_character_type = "avatar"
+        if self.heygen_character_type == "talking_photo":
+            self.heygen_character_id_a = self.heygen_talking_photo_id_a or self.heygen_avatar_id_a
+            self.heygen_character_id_b = self.heygen_talking_photo_id_b or self.heygen_avatar_id_b
+        else:
+            self.heygen_character_id_a = self.heygen_avatar_id_a
+            self.heygen_character_id_b = self.heygen_avatar_id_b
+        self.heygen_avatar_style = _env("HEYGEN_AVATAR_STYLE", default="normal").strip() or None
+
+        # HeyGen Streaming (LiveAvatar)
+        self.stream_client: Optional[HeygenStreamClient] = None
+        self.stream_sessions: Dict[str, StreamSession] = {}
+        self.stream_session_file = _env("STREAM_SESSION_FILE", default="stream_sessions.json")
+        self.stream_quality = _env("HEYGEN_STREAM_QUALITY", default="high")
+        self.stream_video_encoding = _env("HEYGEN_STREAM_VIDEO_ENCODING", default="H264")
+        self.stream_voice_rate = float(_env("HEYGEN_STREAM_VOICE_RATE", default="1.0"))
+        self.stream_disable_idle_timeout = _env("HEYGEN_STREAM_DISABLE_IDLE_TIMEOUT", default="1").strip() != "0"
+        self.stream_task_type = _env("HEYGEN_STREAM_TASK_TYPE", default="repeat")
+        self.stream_chars_per_sec = float(_env("STREAM_CHARS_PER_SEC", default="15"))
+        self.stream_min_s = float(_env("STREAM_MIN_S", default="2.0"))
+        self.stream_pad_s = float(_env("STREAM_PAD_S", default="0.2"))
+        self.stream_auth_mode = _env("HEYGEN_STREAM_AUTH_MODE", default="api_key").strip().lower()
+        self.stream_avatar_a = _env("HEYGEN_STREAM_AVATAR_A", "HEYGEN_AVATAR_NAME_A", default="")
+        self.stream_avatar_b = _env("HEYGEN_STREAM_AVATAR_B", "HEYGEN_AVATAR_NAME_B", default="")
+        self.stream_avatar_id_a = _env("HEYGEN_STREAM_AVATAR_ID_A", default="")
+        self.stream_avatar_id_b = _env("HEYGEN_STREAM_AVATAR_ID_B", default="")
+        self.stream_voice_id_a = _env("HEYGEN_VOICE_ID_A", "HEYGEN_VOICE_ID", default="")
+        self.stream_voice_id_b = _env("HEYGEN_VOICE_ID_B", "HEYGEN_VOICE_ID", default="")
+        self._stream_token: Optional[str] = None
+        self.stream_api_key: str = ""
 
         self.client = OpenAI()
-        self.llm_cfg = LLMConfig(model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+        self.llm_cfg = LLMConfig(model=_env("OPENAI_MODEL", "LLM_MODEL", default="gpt-4.1-mini"))
         self.tts_cfg = TTSConfig(
-            model=os.getenv("TTS_MODEL", "gpt-4o-mini-tts"),
-            fmt=os.getenv("TTS_FORMAT", "mp3"),
+            model=_env("TTS_MODEL", default="gpt-4o-mini-tts"),
+            fmt=_env("TTS_FORMAT", default="mp3"),
         )
         self.tts = TTS(self.client, self.tts_cfg)
-        self.voice_a = os.getenv("TTS_VOICE_A", "alloy")
-        self.voice_b = os.getenv("TTS_VOICE_B", "verse")
-        self.prompt_version = os.getenv("PROMPT_VERSION", "v1")
-        self.anchor_case = os.getenv("ANCHOR_CASE", "").strip()
-        self.roundup_every_n = int(os.getenv("ROUNDUP_EVERY_N", "6"))
-        self.steelman_every_n = int(os.getenv("STEELMAN_EVERY_N", "8"))
-        self.steelman_a_offset = int(os.getenv("STEELMAN_A_OFFSET", "4"))
-        self.steelman_b_offset = int(os.getenv("STEELMAN_B_OFFSET", "0"))
-        self.stream_intro_turn_a = int(os.getenv("STREAM_INTRO_TURN_A", "1"))
-        self.stream_intro_turn_b = int(os.getenv("STREAM_INTRO_TURN_B", "2"))
-        self.max_turns = int(os.getenv("MAX_TURNS", "25"))
+        self.voice_a = _env("TTS_VOICE_A", "VOICE_A", default="alloy")
+        self.voice_b = _env("TTS_VOICE_B", "VOICE_B", default="verse")
+        self.prompt_version = _env("PROMPT_VERSION", default="v1")
+        self.anchor_case = _env("ANCHOR_CASE", default="").strip()
+        self.roundup_every_n = int(_env("ROUNDUP_EVERY_N", default="6"))
+        self.steelman_every_n = int(_env("STEELMAN_EVERY_N", default="8"))
+        self.steelman_a_offset = int(_env("STEELMAN_A_OFFSET", default="4"))
+        self.steelman_b_offset = int(_env("STEELMAN_B_OFFSET", default="0"))
+        self.stream_intro_turn_a = int(_env("STREAM_INTRO_TURN_A", default="1"))
+        self.stream_intro_turn_b = int(_env("STREAM_INTRO_TURN_B", default="2"))
+        self.max_turns = int(_env("MAX_TURNS", default="25"))
 
         self.summary_cfg = SummarizeConfig(
-            model=os.getenv("SUMMARY_MODEL", self.llm_cfg.model),
-            every_n_turns=int(os.getenv("SUMMARY_EVERY_N", "6")),
+            model=_env("SUMMARY_MODEL", default=self.llm_cfg.model),
+            every_n_turns=int(_env("SUMMARY_EVERY_N", "SUMMARY_EVERY_N_TURNS", default="6")),
         )
         self.running_summary = ""
         self.history: List[Dict[str, str]] = []
 
         self.topic_provider = TopicProvider(
             TopicConfig(
-                topic_env=os.getenv("TOPIC_ENV", "TOPIC"),
-                topic_file=os.getenv("TOPIC_FILE", "topic.txt"),
-                reload_s=int(os.getenv("TOPIC_RELOAD_S", "180")),
+                topic_env=_env("TOPIC_ENV", default="TOPIC"),
+                topic_file=_env("TOPIC_FILE", default="topic.txt"),
+                reload_s=int(_env("TOPIC_RELOAD_S", default="180")),
             )
         )
 
         self._stop_event = threading.Event()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._last_scene: Optional[str] = None
+        self._yt_thread: Optional[threading.Thread] = None
         self._method_keywords = [
             "экранир",
             "контрол",
@@ -124,38 +203,39 @@ class Orchestrator:
             "изоля",
         ]
         self._repeat_terms = [
-            "линзир",
-            "системат",
-            "многочаст",
-            "газ",
-            "рентген",
-            "потенциал",
-            "смещ",
-            "центр масс",
-            "центра масс",
+            "эпигенетич",
+            "эпигенетическ",
+            "сенесц",
+            "митохондр",
+            "протеостаз",
+            "воспал",
+            "иммун",
+            "стволов",
+            "метабол",
+            "поврежден",
         ]
         self.test_cycle = [
-            "rotation curves",
-            "weak lensing",
-            "satellite dynamics",
-            "cluster collisions",
-            "CMB+BAO",
-            "direct detection",
-            "structure growth",
+            "epigenetic clocks",
+            "senescence markers",
+            "mitochondrial function",
+            "proteostasis",
+            "inflammaging/immune",
+            "stem cell exhaustion",
+            "metabolic rate",
         ]
         self.test_class_window = int(os.getenv("TEST_CLASS_WINDOW", "10"))
         self.test_class_max = int(os.getenv("TEST_CLASS_MAX", "2"))
-        # Order matters: more specific classes first to avoid weak lensing capturing clusters.
+        # Order matters: more specific classes first to avoid generic matches.
         self._test_class_specs = [
-            ("cluster collisions", {"any": ["скоплен", "cluster", "bullet", "el gordo", "столкнов"]}),
-            ("weak lensing", {"any": ["линзир", "weak lensing", "слабое линзирование"]}),
-            ("rotation curves", {"all": ["крив", "вращ"], "any": ["rotation curve"]}),
-            ("satellite dynamics", {"any": ["спутник", "сателлит", "subhalo", "substructure", "субструктур", "орбит"]}),
-            ("CMB+BAO", {"any": ["cmb", "bao", "акустич", "реликт", "микроволнов"]}),
-            ("direct detection", {"any": ["direct detection", "прямое обнаруж", "прямого обнаруж", "ксенон", "xenon", "argon", "dama", "lux", "supercdms"]}),
-            ("structure growth", {"any": ["рост структур", "growth of structure", "sigma_8", "sigma8", "fs8", "кластеризац", "формирован"]}),
+            ("epigenetic clocks", {"any": ["эпигенет", "epigenetic", "clock", "метилир", "метил"]}),
+            ("senescence markers", {"any": ["сенесц", "senescence", "p16", "p21", "sasp"]}),
+            ("mitochondrial function", {"any": ["митохонд", "mitochond", "ros", "oxidative", "окисл"]}),
+            ("proteostasis", {"any": ["протеостаз", "proteostasis", "autophagy", "аутофаг"]}),
+            ("inflammaging/immune", {"any": ["воспал", "inflamm", "immune", "иммун", "cytokine", "циток"]}),
+            ("stem cell exhaustion", {"any": ["стволов", "stem cell", "stэм", "клеточ"]}),
+            ("metabolic rate", {"any": ["метабол", "metabolic", "insulin", "igf", "mTOR", "rapamycin", "метформ"]}),
         ]
-        self.test_switch_every_n = int(os.getenv("TEST_SWITCH_EVERY_N", "4"))
+        self.test_switch_every_n = int(_env("TEST_SWITCH_EVERY_N", default="4"))
         if self.max_turns > 0:
             default_final_a = max(1, self.max_turns - 2)
             if default_final_a % 2 == 0:
@@ -174,6 +254,102 @@ class Orchestrator:
             os.getenv("STREAM_CLOSING_TURN", str(default_closing))
         )
         self.obs_interp_block = int(os.getenv("OBS_INTERP_BLOCK", "4"))
+        self.ov_scene  = os.getenv("OVERLAY_SCENE", "SCENE_OVERLAY")
+        self.ov_speaker = os.getenv("OVERLAY_SPEAKER", "TXT_SPEAKER")
+        self.ov_topic   = os.getenv("OVERLAY_TOPIC", "TXT_TOPIC")
+        self.ov_stage   = os.getenv("OVERLAY_STAGE", "TXT_STAGE")
+        self.avatar_a = os.getenv("AVATAR_A_SOURCE", "AVATAR_A")
+        self.avatar_b = os.getenv("AVATAR_B_SOURCE", "AVATAR_B")
+        self.f_dim    = os.getenv("FILTER_DIM", "DIM")
+        self.f_speak  = os.getenv("FILTER_SPEAK", "SPEAK")
+        self.enable_highlight = (not self.video_mode) and bool(self.f_speak) and bool(self.f_dim)
+        if self.enable_highlight:
+            try:
+                self.avatar_a_exists = bool(self.obs) and self.obs.source_exists(self.avatar_a)
+                self.avatar_b_exists = bool(self.obs) and self.obs.source_exists(self.avatar_b)
+            except Exception:
+                self.avatar_a_exists = False
+                self.avatar_b_exists = False
+        else:
+            self.avatar_a_exists = False
+            self.avatar_b_exists = False
+        api_key = _env("HEYGEN_API_KEY", default="").strip()
+        if self.streaming_mode:
+            if not api_key:
+                raise RuntimeError("HEYGEN_API_KEY is required when HEYGEN_STREAMING=1")
+            if not ((self.stream_avatar_a or self.stream_avatar_id_a) and (self.stream_avatar_b or self.stream_avatar_id_b)):
+                raise RuntimeError(
+                    "HEYGEN_STREAM_AVATAR_A/B (or HEYGEN_AVATAR_NAME_A/B) is required for streaming mode."
+                )
+            self.stream_api_key = api_key
+            self.stream_client = HeygenStreamClient(HeygenStreamConfig(api_key=api_key))
+        elif self.video_mode:
+            if not api_key:
+                raise RuntimeError("HEYGEN_API_KEY is required when VIDEO_MODE=1")
+            if self.heygen_character_type not in ("avatar", "talking_photo"):
+                raise RuntimeError("HEYGEN_CHARACTER_TYPE must be avatar or talking_photo.")
+            if self.heygen_character_type == "avatar":
+                if self.heygen_avatar_id_a and os.path.exists(self.heygen_avatar_id_a):
+                    raise RuntimeError(
+                        "HEYGEN_AVATAR_ID_A points to a local file path; it must be an avatar_id from HeyGen."
+                    )
+                if self.heygen_avatar_id_b and os.path.exists(self.heygen_avatar_id_b):
+                    raise RuntimeError(
+                        "HEYGEN_AVATAR_ID_B points to a local file path; it must be an avatar_id from HeyGen."
+                    )
+                if not (self.heygen_character_id_a and self.heygen_character_id_b):
+                    raise RuntimeError(
+                        "HEYGEN_AVATAR_ID_A/B is required for Create Avatar Video (V2)."
+                    )
+            else:
+                if self.heygen_character_id_a and os.path.exists(self.heygen_character_id_a):
+                    raise RuntimeError(
+                        "HEYGEN_TALKING_PHOTO_ID_A points to a local file path; it must be a talking_photo_id from HeyGen."
+                    )
+                if self.heygen_character_id_b and os.path.exists(self.heygen_character_id_b):
+                    raise RuntimeError(
+                        "HEYGEN_TALKING_PHOTO_ID_B points to a local file path; it must be a talking_photo_id from HeyGen."
+                    )
+                if not (self.heygen_character_id_a and self.heygen_character_id_b):
+                    raise RuntimeError(
+                        "HEYGEN_TALKING_PHOTO_ID_A/B is required for Create Talking Photo Video (V2)."
+                    )
+            self.video_dir.mkdir(parents=True, exist_ok=True)
+            from src.heygen import HeygenClient, HeygenConfig
+            self.heygen = HeygenClient(HeygenConfig(api_key=api_key))
+
+        self._last_topic: Optional[str] = None
+        self._last_stage: Optional[str] = None
+
+        yt_enable = _env("YOUTUBE_CHAT_ENABLE", "YOUTUBE_TOPIC_ENABLE", default="0").strip() == "1"
+        self._yt_thread = None
+        if yt_enable:
+            try:
+                from src.youtube_chat import YouTubeChatConfig, YouTubeTopicWatcher
+                cfg = YouTubeChatConfig(
+                    api_key=_env("YOUTUBE_API_KEY", default=""),
+                    client_id=_env("YOUTUBE_CLIENT_ID", default=""),
+                    client_secret=_env("YOUTUBE_CLIENT_SECRET", default=""),
+                    refresh_token=_env("YOUTUBE_REFRESH_TOKEN", default=""),
+                    live_chat_id=_env("YOUTUBE_LIVE_CHAT_ID", default=""),
+                    broadcast_id=_env("YOUTUBE_BROADCAST_ID", default=""),
+                    command_prefix=_env("YOUTUBE_TOPIC_PREFIX", default="!topic"),
+                    cooldown_s=int(_env("YOUTUBE_TOPIC_COOLDOWN_S", default="180")),
+                    topic_ttl_s=int(_env("YOUTUBE_TOPIC_TTL_S", default="900")),
+                    allowlist=_env("YOUTUBE_CHAT_ALLOWLIST", default=""),
+                    mods_only=_env("YOUTUBE_CHAT_MODS_ONLY", default="1").strip() != "0",
+                )
+
+                def _on_topic(topic: str, author: dict) -> None:
+                    name = author.get("displayName") or author.get("channelId") or "unknown"
+                    self.topic_provider.set_override(topic, ttl_s=cfg.topic_ttl_s, source="youtube", author=name)
+                    self._write_topic_event(topic, source="youtube", author=name)
+
+                watcher = YouTubeTopicWatcher(cfg, on_topic=_on_topic)
+                self._yt_thread = threading.Thread(target=watcher.run_forever, daemon=True)
+                self._yt_thread.start()
+            except Exception as e:
+                print(f"[youtube] disabled: {e}")
 
     def _queue_len(self) -> int:
         with self._queue_lock:
@@ -189,6 +365,143 @@ class Orchestrator:
         fname = f"turn_{turn_id:05d}_{speaker}.{self.tts_cfg.fmt}"
         return str((self.audio_dir / fname).resolve())
 
+    def _video_out_path(self, turn_id: int, speaker: str) -> str:
+        fname = f"turn_{turn_id:05d}_{speaker}.mp4"
+        return str((self.video_dir / fname).resolve())
+
+    def _heygen_character_id_for_speaker(self, speaker: str) -> Optional[str]:
+        if self.heygen_character_type == "talking_photo":
+            if speaker == "A":
+                return self.heygen_character_id_a or None
+            return self.heygen_character_id_b or None
+        if speaker == "A":
+            return self.heygen_character_id_a or None
+        return self.heygen_character_id_b or None
+
+    def _ensure_stream_sessions(self) -> None:
+        if not self.streaming_mode or not self.stream_client:
+            return
+        if self.stream_sessions.get("A") and self.stream_sessions.get("B"):
+            return
+        if not self._stream_token:
+            if self.stream_auth_mode == "session_token":
+                self._stream_token = self.stream_client.create_token()
+            else:
+                # Default: use API key as Bearer token for streaming.* endpoints
+                self._stream_token = self.stream_api_key
+        token = self._stream_token
+        if not self.stream_sessions.get("A"):
+            self.stream_sessions["A"] = self._create_stream_session(agent="A", token=token)
+        if not self.stream_sessions.get("B"):
+            self.stream_sessions["B"] = self._create_stream_session(agent="B", token=token)
+        write_sessions_file(self.stream_session_file, self.stream_sessions)
+
+    def _create_stream_session(self, *, agent: str, token: str) -> StreamSession:
+        avatar_name = self.stream_avatar_a if agent == "A" else self.stream_avatar_b
+        avatar_id = self.stream_avatar_id_a if agent == "A" else self.stream_avatar_id_b
+        voice_id = self.stream_voice_id_a if agent == "A" else self.stream_voice_id_b
+        info = self.stream_client.new_session(
+            token=token,
+            avatar_name=avatar_name or None,
+            avatar_id=avatar_id or None,
+            voice_id=voice_id or None,
+            voice_rate=self.stream_voice_rate,
+            quality=self.stream_quality,
+            version="v2",
+            video_encoding=self.stream_video_encoding,
+            disable_idle_timeout=self.stream_disable_idle_timeout,
+        )
+        session_id = str(info.get("session_id") or info.get("sessionId") or "")
+        url = str(info.get("url") or "")
+        access_token = str(info.get("access_token") or info.get("accessToken") or "")
+        if not (session_id and url and access_token):
+            raise RuntimeError(f"HeyGen streaming.new missing session fields: {info}")
+        self.stream_client.start_session(token=token, session_id=session_id)
+        return StreamSession(
+            agent=agent,
+            session_id=session_id,
+            url=url,
+            access_token=access_token,
+            token=token,
+            avatar_name=avatar_name or avatar_id or "",
+            voice_id=voice_id or None,
+            created_at=time.time(),
+        )
+
+    def _estimate_stream_duration(self, text: str) -> float:
+        if not text:
+            return self.stream_min_s
+        est = max(self.stream_min_s, len(text) / max(1.0, self.stream_chars_per_sec))
+        return est + self.stream_pad_s
+
+    def _render_video_for_turn(self, turn_id: int, speaker: str, audio_path: str) -> str:
+        if not self.heygen:
+            return ""
+        character_id = self._heygen_character_id_for_speaker(speaker)
+        if not character_id:
+            raise RuntimeError("HEYGEN character id is missing")
+        try:
+            size = os.path.getsize(audio_path)
+        except OSError:
+            size = -1
+        mime = guess_mime(audio_path)
+        print(f"[heygen] upload audio: {audio_path} ({size} bytes, {mime})")
+        def _upload() -> str:
+            return self.heygen.upload_asset(audio_path)
+        audio_asset_id = retry(
+            _upload,
+            name="heygen_upload",
+            max_retries=self.heygen_upload_max_retries,
+            base_delay_s=self.heygen_retry_base_delay_s,
+            max_delay_s=self.heygen_retry_max_delay_s,
+        )
+        print(f"[heygen] audio asset_id: {audio_asset_id}")
+        print(f"[heygen] character_type: {self.heygen_character_type}")
+        print(f"[heygen] character_id: {character_id}")
+        def _gen() -> str:
+            return self.heygen.generate_avatar_video(
+                avatar_id=character_id,
+                audio_asset_id=audio_asset_id,
+                width=self.heygen_dim_w,
+                height=self.heygen_dim_h,
+                avatar_style=self.heygen_avatar_style,
+                character_type=self.heygen_character_type,
+            )
+        video_id = retry(
+            _gen,
+            name="heygen_generate",
+            max_retries=self.heygen_max_retries,
+            base_delay_s=self.heygen_retry_base_delay_s,
+            max_delay_s=self.heygen_retry_max_delay_s,
+        )
+        print(f"[heygen] video_id: {video_id}")
+        def _poll() -> str:
+            return self.heygen.poll_video(
+                video_id,
+                timeout_s=self.heygen_timeout_s,
+                poll_s=self.heygen_poll_s,
+            )
+        video_url = retry(
+            _poll,
+            name="heygen_status",
+            max_retries=self.heygen_status_max_retries,
+            base_delay_s=self.heygen_retry_base_delay_s,
+            max_delay_s=self.heygen_retry_max_delay_s,
+        )
+        print(f"[heygen] video_url: {video_url}")
+        out_path = self._video_out_path(turn_id, speaker)
+        print(f"[heygen] download -> {out_path}")
+        def _download() -> None:
+            self.heygen.download(video_url, out_path)
+        retry(
+            _download,
+            name="heygen_download",
+            max_retries=self.heygen_download_max_retries,
+            base_delay_s=self.heygen_retry_base_delay_s,
+            max_delay_s=self.heygen_retry_max_delay_s,
+        )
+        return out_path
+
     def _write_transcript(self, turn: Turn) -> None:
         evt = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -196,16 +509,48 @@ class Orchestrator:
             "speaker": turn.speaker,
             "text": turn.text,
             "audio_file": turn.audio_file,
+            "video_file": turn.video_file,
+            "stream_session_id": turn.stream_session_id,
+            "stream_task_id": turn.stream_task_id,
+            "duration_est_s": round(turn.duration_est_s, 3) if turn.duration_est_s else 0.0,
             "llm_latency": round(turn.llm_latency, 4),
             "tts_latency": round(turn.tts_latency, 4),
             "model": turn.model,
             "prompt_version": turn.prompt_version,
             "summary_len": turn.summary_len,
-            "source": "llm_tts",
+            "source": "heygen_stream" if self.streaming_mode else "llm_tts",
         }
         with self.transcript_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(evt, ensure_ascii=False) + "\n")
             f.flush()
+
+    def _write_topic_event(self, topic: str, *, source: str, author: str) -> None:
+        evt = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": "topic_change",
+            "topic": topic,
+            "source": source,
+            "author": author,
+        }
+        with self.transcript_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(evt, ensure_ascii=False) + "\n")
+            f.flush()
+
+    def _set_overlay(self, *, speaker: Optional[str], topic: str, stage: str) -> None:
+        self.obs.set_text(self.ov_topic, f"Topic: {topic}")
+        self.obs.set_text(self.ov_stage, stage)
+        if speaker:
+            self.obs.set_text(self.ov_speaker, speaker)
+            try:
+                self.obs.set_scene_item_enabled(self.ov_scene, self.ov_speaker, True)
+            except Exception:
+                pass
+        else:
+            self.obs.set_text(self.ov_speaker, "")
+            try:
+                self.obs.set_scene_item_enabled(self.ov_scene, self.ov_speaker, False)
+            except Exception:
+                pass
 
     def _normalize_media_state(self, state) -> Optional[str]:
         if state is None:
@@ -241,6 +586,7 @@ class Orchestrator:
                     path,
                 ],
                 text=True,
+                stderr=subprocess.DEVNULL,
             ).strip()
             dur = float(out) if out else 0.0
         except Exception:
@@ -295,15 +641,17 @@ class Orchestrator:
                 classes.append(c)
         return classes
 
-    def _wait_playback_end(self) -> None:
+    def _wait_playback_end(self, input_name: Optional[str] = None) -> None:
         # Polling fallback when ffprobe is not available
+        if input_name is None:
+            input_name = self.audio_player
         start_t = time.time()
         start_timeout_s = 5.0
         max_play_s = 60.0
         play_start_t = None
 
         while True:
-            st = self.obs.get_media_status(self.audio_player)
+            st = self.obs.get_media_status(input_name)
             state = (st or {}).get("mediaState") or (st or {}).get("state")
             norm = self._normalize_media_state(state)
 
@@ -380,17 +728,17 @@ class Orchestrator:
                     if allowed:
                         rule += f" Выбери другой класс: {', '.join(allowed)}."
                     extra_rules.append(rule)
-                if recent_classes.count("cluster collisions") >= self.test_class_max:
+                if recent_classes.count("epigenetic clocks") >= self.test_class_max:
                     extra_rules.append(
-                        "Смена плоскости: следующий тест не про скопления/кластеры (включая столкновения)."
+                        "Смена плоскости: следующий тест не про эпигенетические часы; возьми другую метрику."
                     )
         if (not is_closing) and next_turn_id % 3 == 0:
             extra_rules.append("Задай короткий вопрос оппоненту.")
         if (not is_closing) and self.steelman_every_n > 0:
             if speaker == "A" and (next_turn_id % self.steelman_every_n == self.steelman_a_offset):
-                extra_rules.append("Steelman: скажи фразой «Самая сильная боль MOND — …».")
+                extra_rules.append("Steelman: назови самый сильный аргумент гипотезы программируемого старения.")
             if speaker == "B" and (next_turn_id % self.steelman_every_n == self.steelman_b_offset):
-                extra_rules.append("Steelman: скажи фразой «Самый сильный аргумент ΛCDM — …».")
+                extra_rules.append("Steelman: назови самый сильный аргумент гипотезы накопления повреждений.")
         if (not is_closing) and self.test_switch_every_n > 0 and next_turn_id > 1:
             if next_turn_id % self.test_switch_every_n == 1:
                 idx = (next_turn_id // self.test_switch_every_n) % len(self.test_cycle)
@@ -402,7 +750,7 @@ class Orchestrator:
                             suggested = cand
                             break
                 extra_rules.append(
-                    f"Смени тип теста (но сохрани DM vs MOND): {suggested}."
+                    f"Смени тип теста/метрики в рамках старения: {suggested}."
                 )
         if self.obs_interp_block > 0:
             block_idx = (next_turn_id - 1) // self.obs_interp_block
@@ -441,19 +789,33 @@ class Orchestrator:
             extra_rules=extra_rules or None,
         )
 
-        if self.text_only:
+        if self.text_only or self.streaming_mode:
             audio_path = ""
             tts_latency = 0.0
+            video_path = ""
         else:
             voice = self.voice_a if speaker == "A" else self.voice_b
             audio_path = self._audio_out_path(next_turn_id, speaker)
             tts_latency = self.tts.speak(text=text, voice=voice, out_path=audio_path)
+            video_path = ""
+            if self.video_mode:
+                cached_path = self._video_out_path(next_turn_id, speaker)
+                if os.path.exists(cached_path) and os.path.getsize(cached_path) > 0:
+                    video_path = cached_path
+                    print(f"[heygen] reuse cached video: {cached_path}")
+                else:
+                    try:
+                        video_path = self._render_video_for_turn(next_turn_id, speaker, audio_path)
+                    except Exception as e:
+                        print(f"[heygen] error: {e}")
+                        raise
 
         turn = Turn(
             turn_id=next_turn_id,
             speaker=speaker,
             text=text,
             audio_file=audio_path,
+            video_file=video_path,
             llm_latency=llm_latency,
             tts_latency=tts_latency,
             model=self.llm_cfg.model,
@@ -510,30 +872,141 @@ class Orchestrator:
 
         if turn is None:
             if not self.text_only and self._last_scene != self.scene_idle:
+                try:
+                    topic = self._last_topic or self.topic_provider.get()
+                    stage = self._last_stage or ("INTRO" if self.turn_seq <= 2 else "DISCUSSION")
+                    self._set_overlay(speaker=None, topic=topic, stage=stage)
+                except Exception as e:
+                    print(f"[overlay] warn: {e}")
                 self.obs.set_scene(self.scene_idle)
                 self._last_scene = self.scene_idle
             time.sleep(self.idle_sleep_s)
             return None
 
+        media_input = self.audio_player
+        media_path = turn.audio_file
         if not self.text_only:
             next_scene = self._scene_for_speaker(turn.speaker)
+            if self.video_mode:
+                if not turn.video_file:
+                    print("[heygen] warn: video missing; skipping playback (no audio)")
+                    self._write_transcript(turn)
+                    time.sleep(self.idle_sleep_s)
+                    return turn
+                media_input = self.video_player_a if turn.speaker == "A" else self.video_player_b
+                media_path = turn.video_file
+                # Preload the file before switching scenes to reduce black frames on activation.
+                try:
+                    self.obs.set_media_file(media_input, media_path)
+                except Exception as e:
+                    print(f"[obs] warn: set_media_file failed (preload): {e}")
             if self._last_scene != next_scene:
                 self.obs.set_scene(next_scene)
                 self._last_scene = next_scene
-            self.obs.set_media_file(self.audio_player, turn.audio_file)
-            self.obs.restart_media(self.audio_player)
+                if self.scene_switch_delay_s > 0:
+                    time.sleep(self.scene_switch_delay_s)
+            speaker_name = "Scientist" if turn.speaker == "A" else "Skeptic"
+            stage = "INTRO" if turn.turn_id <= 2 else "DISCUSSION"
+            topic = self.topic_provider.get() if hasattr(self, "topic_provider") else "—"
+            try:
+                self._set_overlay(speaker=speaker_name, topic=topic, stage=stage)
+                self._last_topic = topic
+                self._last_stage = stage
+            except Exception as e:
+                print(f"[overlay] warn: {e}")
+            try:
+                is_a = (turn.speaker == "A")
+
+                if self.enable_highlight and (self.avatar_a_exists or self.avatar_b_exists):
+                    # A
+                    if self.avatar_a_exists and self.obs.has_filter(self.avatar_a, self.f_speak):
+                        self.obs.set_filter_enabled(self.avatar_a, self.f_speak, is_a)
+                    if self.avatar_a_exists and self.obs.has_filter(self.avatar_a, self.f_dim):
+                        self.obs.set_filter_enabled(self.avatar_a, self.f_dim, not is_a)
+
+                    # B
+                    if self.avatar_b_exists and self.obs.has_filter(self.avatar_b, self.f_speak):
+                        self.obs.set_filter_enabled(self.avatar_b, self.f_speak, not is_a)
+                    if self.avatar_b_exists and self.obs.has_filter(self.avatar_b, self.f_dim):
+                        self.obs.set_filter_enabled(self.avatar_b, self.f_dim, is_a)
+            except Exception as e:
+                print(f"[highlight] warn: {e}")
+            if self.streaming_mode:
+                self._ensure_stream_sessions()
+                session = self.stream_sessions.get(turn.speaker)
+                if not session or not session.session_id:
+                    raise RuntimeError("HeyGen streaming session missing for speaker")
+                resp = self.stream_client.send_task(
+                    token=session.token,
+                    session_id=session.session_id,
+                    text=turn.text,
+                    task_type=self.stream_task_type,
+                )
+                task_id = ""
+                if isinstance(resp, dict):
+                    if isinstance(resp.get("data"), dict):
+                        task_id = str(resp["data"].get("task_id") or resp["data"].get("taskId") or "")
+                    else:
+                        task_id = str(resp.get("task_id") or resp.get("taskId") or "")
+                turn.stream_session_id = session.session_id
+                turn.stream_task_id = task_id
+                turn.duration_est_s = self._estimate_stream_duration(turn.text)
+                self._write_transcript(turn)
+                time.sleep(turn.duration_est_s)
+                return turn
+            if not self.video_mode:
+                self.obs.set_media_file(media_input, media_path)
+            self.obs.restart_media(media_input)
+            if self.video_mode:
+                ok = self.obs.wait_media_playing(media_input, timeout_s=self.media_start_timeout_s)
+                if not ok:
+                    for _ in range(self.media_start_retries):
+                        time.sleep(self.media_start_retry_sleep_s)
+                        self.obs.restart_media(media_input)
+                        if self.obs.wait_media_playing(media_input, timeout_s=self.media_start_timeout_s):
+                            ok = True
+                            break
+                    if not ok:
+                        print("[obs] warn: media did not start playing; continuing anyway")
 
         self._write_transcript(turn)
         if self.text_only:
             time.sleep(self.text_only_sleep_s)
         elif self._ffprobe:
-            dur = self._get_audio_duration(turn.audio_file)
+            dur_path = turn.audio_file or media_path
+            dur = self._get_audio_duration(dur_path)
             time.sleep(dur + self.playback_pad_s)
         else:
-            self._wait_playback_end()
+            self._wait_playback_end(media_input)
         return turn
 
     def run_forever(self) -> None:
+        if self.streaming_mode:
+            try:
+                self._ensure_stream_sessions()
+            except Exception as e:
+                print(f"[heygen_stream] session init error: {e}")
+                raise
+        prebuffer_n = int(os.getenv("PREBUFFER_TURNS_PER_SPEAKER", "0"))
+        if prebuffer_n > 0:
+            total = prebuffer_n * 2
+            print(f"[prefetch] prebuffering {prebuffer_n} turns per speaker ({total} total)...")
+            max_errors = int(os.getenv("PREBUFFER_MAX_ERRORS", "10"))
+            retry_sleep = float(os.getenv("PREBUFFER_RETRY_S", "3.0"))
+            errors = 0
+            generated = 0
+            while generated < total and not self._stop_event.is_set():
+                try:
+                    self.prefetch_next()
+                    generated += 1
+                except Exception as e:
+                    errors += 1
+                    print(f"[prefetch] prebuffer error: {e}")
+                    if errors >= max_errors:
+                        print("[prefetch] too many errors; continue without full prebuffer")
+                        break
+                    time.sleep(retry_sleep)
+            print("[prefetch] prebuffer complete ✅")
         self.start_prefetch()
         while True:
             self.play_next()
